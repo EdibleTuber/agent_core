@@ -4,7 +4,7 @@ Shared library for the agent ecosystem. Provides daemon runtime, socket protocol
 
 ## Status
 
-Under active extraction from PAL. See `docs/agent-core-extraction-design.md` (in PAL repo) for the design.
+Under active extraction from PAL. See `docs/superpowers/specs/2026-04-25-agent-core-extraction-design.md` in the PAL repo for the design.
 
 ## Installation
 
