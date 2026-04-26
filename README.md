@@ -11,7 +11,7 @@ Under active extraction from PAL. See `docs/superpowers/specs/2026-04-25-agent-c
 Private repo, install via git:
 
 ```bash
-pip install "agent_core @ git+https://github.com/EdibleTuber/agent_core.git@v0.1.0"
+pip install "agent_core @ git+https://github.com/EdibleTuber/agent_core.git@v0.1.1"
 ```
 
 For development against a local checkout:
