@@ -8,15 +8,22 @@ Adapted from PAL's tests/conftest.py — trimmed to only the routes required
 by agent_core's URL-fetcher tests (no pal-specific imports).
 """
 import asyncio
+import json
 import socket
 from collections.abc import AsyncGenerator
 
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 import uvicorn
+
+
+# Captures every /v1/chat/completions body sent to the mock server.
+# Tests that care about what model/payload hit the wire read from this list.
+# Cleared automatically before each test by the autouse _clear_request_log fixture.
+REQUEST_LOG: list[dict] = []
 
 
 async def mock_page_html(request: Request):
@@ -94,6 +101,148 @@ async def mock_page_with_code(request: Request):
     )
 
 
+async def mock_chat_completions(request: Request):
+    """Mock OpenAI-compatible /v1/chat/completions endpoint."""
+    body = await request.json()
+    REQUEST_LOG.append(body)
+    stream = body.get("stream", False)
+    messages = body.get("messages", [])
+    last_user = next(
+        (m["content"] for m in reversed(messages) if m["role"] == "user"),
+        "",
+    )
+
+    has_tool_result = any(m.get("role") == "tool" for m in messages)
+    if has_tool_result:
+        tool_content = next(
+            (m["content"] for m in messages if m.get("role") == "tool"), ""
+        )
+        summary = tool_content[:50] if tool_content else "no content"
+        if not stream:
+            return JSONResponse({
+                "choices": [{"message": {"role": "assistant", "content": f"Tool result: {summary}"}}]
+            })
+        async def generate_after_tool():
+            text = f"Tool result: {summary}"
+            tokens = text.split(" ")
+            for i, token in enumerate(tokens):
+                prefix = "" if i == 0 else " "
+                chunk = {
+                    "choices": [{
+                        "delta": {"content": prefix + token},
+                        "finish_reason": None,
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(generate_after_tool(), media_type="text/event-stream")
+
+    tools = body.get("tools", [])
+    if tools and last_user.startswith("TOOLCALL:"):
+        tool_name = last_user.split(":", 1)[1].strip()
+        if not stream:
+            return JSONResponse({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "call_001",
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": '{"path": "Research/quantum.md"}',
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }]
+            })
+        async def generate_tool():
+            chunk = {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_001",
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": '{"path": "Res',
+                            },
+                        }]
+                    },
+                    "finish_reason": None,
+                }]
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+            chunk2 = {
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": 'earch/quantum.md"}',
+                            },
+                        }]
+                    },
+                    "finish_reason": None,
+                }]
+            }
+            yield f"data: {json.dumps(chunk2)}\n\n"
+            done_chunk = {
+                "choices": [{"delta": {}, "finish_reason": "tool_calls"}]
+            }
+            yield f"data: {json.dumps(done_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(generate_tool(), media_type="text/event-stream")
+
+    if last_user.startswith("REASON:"):
+        actual_query = last_user.split(":", 1)[1].strip()
+        if not stream:
+            return JSONResponse({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": f"answer: {actual_query}",
+                        "reasoning_content": f"thinking about {actual_query}",
+                    },
+                    "finish_reason": "stop",
+                }]
+            })
+
+    if not stream:
+        return JSONResponse({
+            "choices": [{"message": {"role": "assistant", "content": f"echo: {last_user}"}}]
+        })
+
+    async def generate():
+        tokens = [t for t in f"echo: {last_user}".split(" ") if t]
+        for i, token in enumerate(tokens):
+            prefix = "" if i == 0 else " "
+            chunk = {
+                "choices": [{
+                    "delta": {"content": prefix + token},
+                    "finish_reason": None,
+                }]
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+async def mock_list_models(request: Request):
+    """Mock /v1/models endpoint."""
+    return JSONResponse({
+        "object": "list",
+        "data": [
+            {"id": "test-model", "object": "model", "created": 0, "owned_by": "local"},
+            {"id": "gemma-4-26b-a4b-it-q4_k_m", "object": "model", "created": 0, "owned_by": "local"},
+        ],
+    })
+
+
 mock_app = Starlette(routes=[
     Route("/page.html", mock_page_html, methods=["GET"]),
     Route("/too-large", mock_page_too_large, methods=["GET"]),
@@ -102,6 +251,8 @@ mock_app = Starlette(routes=[
     Route("/redirect", mock_page_redirect, methods=["GET"]),
     Route("/no-content-type", mock_page_no_content_type, methods=["GET"]),
     Route("/page-with-code.html", mock_page_with_code, methods=["GET"]),
+    Route("/v1/chat/completions", mock_chat_completions, methods=["POST"]),
+    Route("/v1/models", mock_list_models, methods=["GET"]),
 ])
 
 
@@ -126,3 +277,10 @@ async def mock_inference_server() -> AsyncGenerator[str, None]:
 
     server.should_exit = True
     await task
+
+
+@pytest.fixture(autouse=True)
+def _clear_request_log():
+    """Clear REQUEST_LOG before each test to prevent cross-test leakage."""
+    REQUEST_LOG.clear()
+    yield
