@@ -278,6 +278,41 @@ async def mock_collection_get_doc(request: Request):
     })
 
 
+async def mock_searxng_search(request: Request):
+    """Mock SearxNG /search endpoint.
+
+    Returns URLs pointing back to the mock server so research-style
+    tests can fetch them through the same fixture.
+    """
+    query = request.query_params.get("q", "")
+    base = str(request.base_url).rstrip("/")
+    return JSONResponse({
+        "query": query,
+        "results": [
+            {
+                "url": f"{base}/page.html?topic={query.replace(' ', '-')}&src=1",
+                "title": f"{query} - Overview",
+                "content": f"Overview of {query}.",
+            },
+            {
+                "url": f"{base}/page.html?topic={query.replace(' ', '-')}&src=2",
+                "title": f"{query} - Tutorial",
+                "content": f"Tutorial on {query}.",
+            },
+            {
+                "url": f"{base}/page.html?topic={query.replace(' ', '-')}&src=3",
+                "title": f"{query} - Reference",
+                "content": f"Reference for {query}.",
+            },
+            {
+                "url": "https://evil.example.com/junk",
+                "title": "Not allowlisted",
+                "content": "Should be filtered by allowlist.",
+            },
+        ],
+    })
+
+
 mock_app = Starlette(routes=[
     Route("/page.html", mock_page_html, methods=["GET"]),
     Route("/too-large", mock_page_too_large, methods=["GET"]),
@@ -290,6 +325,7 @@ mock_app = Starlette(routes=[
     Route("/v1/models", mock_list_models, methods=["GET"]),
     Route("/collections/{collection_id}/search", mock_collection_search, methods=["POST"]),
     Route("/collections/{collection_id}/docs/{doc_id:path}", mock_collection_get_doc, methods=["GET"]),
+    Route("/search", mock_searxng_search, methods=["GET"]),
 ])
 
 
