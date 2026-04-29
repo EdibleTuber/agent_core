@@ -1,4 +1,7 @@
 """Tests for the inference server HTTP client."""
+import json
+
+import httpx
 import pytest
 
 from agent_core.inference import InferenceClient, CompletionResult, ToolCall
@@ -160,3 +163,55 @@ async def test_complete_uses_override_model(mock_inference_server):
 async def test_default_model_attribute(mock_inference_server):
     client = InferenceClient(base_url=mock_inference_server, model="my-model")
     assert client.default_model == "my-model"
+
+
+@pytest.mark.asyncio
+async def test_complete_includes_max_tokens_when_set():
+    """When max_tokens is passed, it appears in the request payload."""
+    captured: dict = {}
+
+    async def mock_handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+            },
+        )
+
+    transport = httpx.MockTransport(mock_handler)
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=transport)
+
+    await client.complete(messages=[{"role": "user", "content": "hi"}], max_tokens=512)
+
+    assert captured["body"].get("max_tokens") == 512
+
+
+@pytest.mark.asyncio
+async def test_complete_omits_max_tokens_when_none():
+    """When max_tokens is None (default), no max_tokens key is in the payload."""
+    captured: dict = {}
+
+    async def mock_handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop",
+                }],
+            },
+        )
+
+    transport = httpx.MockTransport(mock_handler)
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=transport)
+
+    await client.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert "max_tokens" not in captured["body"]

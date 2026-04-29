@@ -131,6 +131,7 @@ class InferenceClient:
         tools: list[dict] | None = None,
         model: str | None = None,
         reasoning: Literal["on", "off"] | None = None,
+        max_tokens: int | None = None,
     ) -> CompletionResult:
         """Send a non-streaming completion request.
 
@@ -146,6 +147,8 @@ class InferenceClient:
             payload = shape_request(payload, resolved_model, reasoning)
             if reasoning == "on" and "chat_template_kwargs" not in payload:
                 logger.debug("reasoning control requested but no-op for model %s", resolved_model)
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         resp = await self._post_with_retry(payload)
         data = resp.json()
