@@ -48,6 +48,16 @@ class CompletionResult:
     reasoning: str | None = None
 
 
+@dataclass
+class StreamEnd:
+    """Sentinel yielded as the final item by `InferenceClient.stream()` after the
+    SSE stream completes (text-output path only). Not yielded when the model
+    emitted tool calls; the tool-call list itself signals end-of-stream there.
+    """
+    finish_reason: str   # "stop" | "length" | "tool_calls" | "content_filter" | "unknown"
+    chunks_yielded: int
+
+
 class InferenceClient:
     def __init__(self, base_url: str, model: str, is_batch: bool = False) -> None:
         self.base_url = base_url.rstrip("/")
@@ -131,6 +141,7 @@ class InferenceClient:
         tools: list[dict] | None = None,
         model: str | None = None,
         reasoning: Literal["on", "off"] | None = None,
+        max_tokens: int | None = None,
     ) -> CompletionResult:
         """Send a non-streaming completion request.
 
@@ -146,6 +157,8 @@ class InferenceClient:
             payload = shape_request(payload, resolved_model, reasoning)
             if reasoning == "on" and "chat_template_kwargs" not in payload:
                 logger.debug("reasoning control requested but no-op for model %s", resolved_model)
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         resp = await self._post_with_retry(payload)
         data = resp.json()
@@ -179,12 +192,18 @@ class InferenceClient:
         tools: list[dict] | None = None,
         model: str | None = None,
         reasoning: Literal["on", "off"] | None = None,
-    ) -> AsyncGenerator[str | list[ToolCall], None]:
+        max_tokens: int | None = None,
+    ) -> AsyncGenerator[str | list[ToolCall] | StreamEnd, None]:
         """Send a streaming completion request.
 
         Yields str tokens for text responses. If the model returns tool calls
         instead, accumulates all tool-call deltas and yields a single
         list[ToolCall] as the only item.
+
+        For text responses, after the SSE stream ends, yields a final
+        `StreamEnd(finish_reason, chunks_yielded)` sentinel. Tool-call
+        responses do not get a trailing StreamEnd; the tool-call list itself
+        signals end-of-stream.
         """
         resolved_model = model or self.default_model
         payload: dict = {"model": resolved_model, "messages": messages, "stream": True}
@@ -195,10 +214,14 @@ class InferenceClient:
             payload = shape_request(payload, resolved_model, reasoning)
             if reasoning == "on" and "chat_template_kwargs" not in payload:
                 logger.debug("reasoning control requested but no-op for model %s", resolved_model)
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         # Accumulators for tool-call deltas
         tool_call_acc: dict[int, dict] = {}  # index -> {id, name, arguments_str}
         is_tool_response = False
+        chunks_yielded = 0
+        finish_reason = "unknown"
         url = f"{self.base_url}/v1/chat/completions"
 
         async with self._stream_with_retry(url, payload) as resp:
@@ -209,7 +232,10 @@ class InferenceClient:
                 if data == "[DONE]":
                     break
                 chunk = json.loads(data)
-                delta = chunk["choices"][0].get("delta", {})
+                choice = chunk["choices"][0]
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                delta = choice.get("delta", {})
 
                 # Check for tool call deltas
                 tc_deltas = delta.get("tool_calls")
@@ -236,6 +262,7 @@ class InferenceClient:
                 # Regular text content
                 content = delta.get("content")
                 if content is not None:
+                    chunks_yielded += 1
                     yield content
 
         # If we accumulated tool calls, yield them as a single list
@@ -250,3 +277,6 @@ class InferenceClient:
                     arguments=args,
                 ))
             yield calls
+        else:
+            # Text-output path: emit a sentinel describing how the stream ended.
+            yield StreamEnd(finish_reason=finish_reason, chunks_yielded=chunks_yielded)
