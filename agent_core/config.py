@@ -93,7 +93,12 @@ def load_config(
             continue
         raw = os.environ[env_name]
         field_type = type_hints.get(f.name, str)
-        kwargs[f.name] = _coerce(field_type, raw)
+        try:
+            kwargs[f.name] = _coerce(field_type, raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid value for {env_name}: {raw!r} ({exc})",
+            ) from exc
     cfg = config_cls(**kwargs)
     if cfg.socket_path is None:
         cfg.socket_path = _default_socket_path(agent_name)

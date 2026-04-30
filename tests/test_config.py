@@ -82,3 +82,11 @@ def test_load_config_subclass_extra_field(monkeypatch):
     assert cfg.my_extra == 999
     # BaseConfig fields still load correctly via the same prefix.
     assert cfg.inference_url == "http://192.168.1.14:11434"  # unchanged from default
+
+
+def test_load_config_invalid_int_raises_with_field_name(monkeypatch):
+    """A malformed int env var raises ValueError mentioning the env var name,
+    so deploy-time misconfigs surface clearly."""
+    monkeypatch.setenv("PAL_HISTORY_DEPTH", "banana")
+    with pytest.raises(ValueError, match="PAL_HISTORY_DEPTH"):
+        load_config(BaseConfig, agent_name="pal")
