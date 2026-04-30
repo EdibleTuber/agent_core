@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0] - 2026-04-30
+
+### Added
+- `agent_core.config.BaseConfig`: dataclass with universally-shared agent fields, plus `load_config()` with name-derived env-var prefix machinery (e.g. agent name "pal" reads `PAL_*` env vars; "re-lab" reads `RELAB_*`). Subclasses extend with domain fields. Coercion errors annotate the offending env-var name.
+- `agent_core.agent.Agent`: base class with extension points `setup()`, `system_prompt()`, `handle_chat()`, `handle_command()`, `decide_mode()`. Framework managers (profile, wisdom, learning, allowlist, approval_registry, channels, inference, retrieval, websearch) are populated by `run_daemon()` before `setup()` runs.
+- `agent_core.agent.HandlerContext`: per-turn dataclass carrying conversation, channel_id, writer.
+- `agent_core.client.DaemonConnection`: async unix-socket client (lifted from PAL with the asyncio.Lock for concurrent-read safety, `is_connected` property, and `chat()`/`command()`/`command_stream()` end-of-turn helpers).
+- `agent_core.daemon.Daemon`: transport-only daemon. Connection lifecycle, NDJSON decode, dispatch to agent handlers, NDJSON encode, disconnect cleanup. Reserves `_chat_tasks` for the deferred per-channel preemption safety fix.
+- `agent_core.runtime.run_daemon()`: entry point that wires framework managers onto the agent and starts the daemon.
+- `agent_core.adapters.cli.run_repl()`: generic REPL with a `Renderer` Protocol for agent-specific message rendering. Default rendering covers the seven generic message types.
+- Contract tests in `tests/test_contract.py` pinning the API surface.
+
+### Notes
+- This release is the first that lets a new agent ship as just a small `Agent` subclass plus a `run_daemon(MyAgent())` entry point. PAL adopts in PAL's Phase E migration.
+- Phase F (next) extracts tool/command/prompt scaffolding so default `handle_chat` / `handle_command` implementations can use registries instead of every agent reimplementing dispatch.
+
 ## [0.4.0] - 2026-04-29
 
 ### Added
