@@ -35,10 +35,13 @@ class DaemonConnection:
         self._read_lock = asyncio.Lock()
 
     async def connect(self) -> None:
-        """Open the unix socket connection."""
+        """Open the unix socket connection. Fresh read-lock per connection."""
         self.reader, self.writer = await asyncio.open_unix_connection(
             path=str(self.socket_path), limit=STREAM_BUFFER_LIMIT,
         )
+        # Fresh lock on each connect() so reconnect after close() never inherits
+        # a held lock from a cancelled-mid-flight helper coroutine.
+        self._read_lock = asyncio.Lock()
 
     @property
     def is_connected(self) -> bool:
@@ -52,7 +55,12 @@ class DaemonConnection:
         await self.writer.drain()
 
     async def receive(self) -> AsyncIterator[object]:
-        """Yield messages from the daemon until the connection closes."""
+        """Yield messages from the daemon until the connection closes.
+
+        Does NOT hold _read_lock. Do not interleave with chat()/command()/
+        command_stream() on the same connection; readline() races on the
+        shared StreamReader and produces interleaved or out-of-order results.
+        """
         assert self.reader is not None, "connect() before receive()"
         while not self.reader.at_eof():
             line = await self.reader.readline()
