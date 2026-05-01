@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.1] - 2026-04-30
+
+### Added
+- `Agent.handle_other(msg, ctx)` — synchronous default-noop hook for messages that aren't ChatMessage or CommandMessage. Lets agents route domain-specific message types (approval responses, batch fallback choices) without subclassing the daemon.
+- `Daemon._handle_connection` dispatches non-Chat/non-Command messages to `agent.handle_other` instead of emitting an "unexpected message type" error.
+
+### Notes
+- This unblocks PAL's Phase E migration: PAL's CLI sends `ResearchApprovalResponseMessage` and `BatchFallbackApprovalMessage` directly (not via Chat/Command), and these need agent-side routing.
+- Default `handle_other` is a no-op so existing minimal agents don't break.
+
 ## [0.5.0] - 2026-04-30
 
 ### Added

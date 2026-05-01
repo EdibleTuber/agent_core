@@ -129,6 +129,56 @@ async def test_daemon_dispatches_command(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_daemon_dispatches_unknown_message_to_handle_other(tmp_path):
+    """Non-Chat/non-Command messages route to agent.handle_other."""
+    from dataclasses import dataclass
+
+    from agent_core.protocol import register_message
+
+    @dataclass
+    class CustomApprovalMessage:
+        proposal_id: str
+        choice: str
+        type: str = "custom_approval_test"
+
+    register_message(CustomApprovalMessage)
+
+    agent = _wire_minimal_agent(tmp_path)
+    received: list = []
+
+    async def custom_handle_other(msg, ctx):
+        received.append((msg, ctx.channel_id))
+
+    agent.handle_other = custom_handle_other  # type: ignore[assignment]
+
+    daemon = Daemon(agent)
+    server = await asyncio.start_unix_server(
+        daemon._handle_connection, path=str(agent.config.socket_path),
+    )
+    try:
+        reader, writer = await asyncio.open_unix_connection(
+            path=str(agent.config.socket_path),
+        )
+        writer.write(encode_message(CustomApprovalMessage(
+            proposal_id="abc", choice="approve",
+        )))
+        await writer.drain()
+
+        # No response expected from the daemon for handle_other (synchronous, no yield).
+        # Allow handler to run.
+        await asyncio.sleep(0.05)
+
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert len(received) == 1
+    assert received[0][0].proposal_id == "abc"
+
+
+@pytest.mark.asyncio
 async def test_daemon_emits_error_on_decode_failure(tmp_path):
     agent = _wire_minimal_agent(tmp_path)
     daemon = Daemon(agent)
