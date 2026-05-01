@@ -71,6 +71,17 @@ class Agent:
         raise NotImplementedError
         yield  # pragma: no cover
 
+    async def handle_other(self, msg, ctx: HandlerContext) -> None:
+        """Handle messages that aren't ChatMessage or CommandMessage.
+
+        Default: no-op. The base Daemon dispatches non-Chat/non-Command messages
+        here so agents can route domain-specific message types (approval
+        responses, batch fallback choices, etc.) without subclassing the daemon.
+        Synchronous (does not yield); the daemon does not write any response on
+        the agent's behalf.
+        """
+        pass
+
     def decide_mode(self, conversation: Conversation) -> str:
         """Return 'on' / 'off' / 'auto' for reasoning mode. Default delegates
         to agent_core.reasoning.decide_mode."""

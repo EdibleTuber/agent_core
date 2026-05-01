@@ -94,11 +94,14 @@ class Daemon:
                     )
                     owned_tasks.append(task)
                 else:
-                    err = ErrorMessage(
-                        error=f"unexpected message type: {type(msg).__name__}",
-                    )
-                    writer.write(encode_message(err))
-                    await writer.drain()
+                    # Synchronous dispatch for agent-specific message types
+                    # (approval responses, batch fallback choices, etc.).
+                    # The agent's default no-op makes unknown messages silent;
+                    # PAL overrides handle_other to route approval messages.
+                    try:
+                        await self.agent.handle_other(msg, ctx)
+                    except Exception as exc:
+                        logger.exception("handle_other failed: %s", exc)
 
         except (asyncio.CancelledError, ConnectionResetError):
             pass
