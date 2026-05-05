@@ -6,6 +6,18 @@ from agent_core.tools.base import Tool
 from agent_core.tools.executor import ToolExecutor
 
 
+@pytest.fixture(autouse=True)
+def _empty_builtin_tools(monkeypatch):
+    """Isolate executor tests from the live BUILTIN_TOOLS list.
+
+    Tests in this module construct ToolExecutor.build() to assert exact
+    membership; once Task 11 populates BUILTIN_TOOLS with 12 entries,
+    those assertions would otherwise silently include the builtins.
+    """
+    monkeypatch.setattr("agent_core.tools.builtin.BUILTIN_TOOLS", [])
+    monkeypatch.setattr("agent_core.tools.executor.BUILTIN_TOOLS", [])
+
+
 class _Echo(Tool):
     name = "echo"
     description = "Echoes its input"
@@ -114,12 +126,5 @@ def test_names_preserves_insertion_order():
         name = "c"; description = ""; parameters = {}
         async def run(self, args, ctx): return ""
     agent = _StubAgent()
-    # Neutralize BUILTIN_TOOLS for this ordering test
-    from agent_core.tools import builtin as b_mod
-    saved = b_mod.BUILTIN_TOOLS
-    b_mod.BUILTIN_TOOLS = []
-    try:
-        executor = ToolExecutor.build(agent, [A, B, C])
-        assert executor.names() == ["a", "b", "c"]
-    finally:
-        b_mod.BUILTIN_TOOLS = saved
+    executor = ToolExecutor.build(agent, [A, B, C])
+    assert executor.names() == ["a", "b", "c"]

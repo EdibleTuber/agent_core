@@ -40,7 +40,7 @@ class ToolExecutor:
                     raise RuntimeError(
                         f"Tool {tool_cls.name!r} requires agent.{attr!r}, "
                         f"but {type(agent).__name__} has no such attribute. "
-                        f"Set it in setup() or add {tool_cls.name!r} to disabled_builtins."
+                        f"Add it in setup(), or remove {tool_cls.name!r} from tools / disabled_builtins."
                     )
             instances[tool_cls.name] = tool_cls()
         return cls(instances)
