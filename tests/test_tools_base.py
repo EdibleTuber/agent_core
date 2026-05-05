@@ -32,12 +32,11 @@ def test_tool_to_openai_schema():
     }
 
 
-def test_tool_run_not_implemented():
+async def test_tool_run_not_implemented():
     class MyTool(Tool):
         name = "my_tool"
         description = "A test tool"
         parameters = {}
 
-    import asyncio
     with pytest.raises(NotImplementedError):
-        asyncio.run(MyTool().run({}, ctx=None))
+        await MyTool().run({}, ctx=None)
