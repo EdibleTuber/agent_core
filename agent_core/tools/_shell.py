@@ -1,6 +1,8 @@
 """Read-only shell-style builtin tools, scoped to the agent's vault."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from agent_core.tools.base import Tool
 from agent_core.tools._shell_helpers import cap_output, is_system_path, resolve_safe
 
@@ -129,8 +131,8 @@ class Ls(Tool):
 
         vault = ctx.agent.config.vault_path
         if path:
-            if is_system_path(path) and not show_hidden:
-                return f"Error: system path is not listable without show_hidden: {path}"
+            if is_system_path(path):
+                return f"Error: system path is not listable: {path}"
             resolved = resolve_safe(vault, path)
             if resolved is None:
                 return f"Error: path escapes outside vault: {path}"
@@ -188,7 +190,6 @@ class Grep(Tool):
 
     async def run(self, args, ctx):
         import re
-        from pathlib import Path
 
         pattern_str = args.get("pattern", "")
         if not pattern_str:

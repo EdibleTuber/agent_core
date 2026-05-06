@@ -81,3 +81,12 @@ async def test_ls_caps_at_500_entries(tmp_path):
     agent = _Agent(tmp_path)
     result = await Ls().run({}, _ctx(agent))
     assert "[output truncated:" in result or "more entries" in result.lower()
+
+
+async def test_ls_rejects_system_path_even_with_show_hidden(tmp_path):
+    (tmp_path / "_channels").mkdir()
+    (tmp_path / "_channels" / "secret.md").write_text("private")
+    agent = _Agent(tmp_path)
+    result = await Ls().run({"path": "_channels", "show_hidden": True}, _ctx(agent))
+    assert "system path" in result.lower()
+    assert "secret.md" not in result

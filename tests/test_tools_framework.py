@@ -193,6 +193,7 @@ async def test_add_learning_stores():
     learning.add.assert_called_once()
     call_kwargs = learning.add.call_args
     assert call_kwargs.kwargs.get("title") == "T" or call_kwargs.args[0] == "T"
+    assert call_kwargs.kwargs.get("source") == "agent_tool"
     assert "my-lesson-slug" in result or "added" in result.lower()
 
 
