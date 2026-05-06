@@ -12,7 +12,12 @@ OUTPUT_CAP_BYTES = 32 * 1024
 
 
 def resolve_safe(vault_path: Path, arg: str) -> Path | None:
-    """Resolve `arg` against `vault_path`. Returns None if it escapes."""
+    """Resolve `arg` against `vault_path`. Returns None if it escapes the vault.
+
+    The returned Path is always fully resolved (symlinks collapsed, no `..`
+    components), regardless of whether `vault_path` was passed resolved.
+    Existence is NOT checked — callers must verify themselves.
+    """
     try:
         full = (vault_path / arg).resolve()
     except (OSError, ValueError):
@@ -24,8 +29,8 @@ def resolve_safe(vault_path: Path, arg: str) -> Path | None:
     return full
 
 
-def is_system_path(path: str) -> bool:
-    """True if any path component starts with `_`."""
+def is_system_path(path: str | Path) -> bool:
+    """True if any path component starts with `_`. Accepts str or Path."""
     return any(part.startswith("_") for part in Path(path).parts)
 
 
