@@ -168,3 +168,85 @@ class Ls(Tool):
         if truncated:
             out_lines.append(f"[output truncated: more than {max_entries} entries]")
         return cap_output("\n".join(out_lines))
+
+
+class Grep(Tool):
+    name = "grep"
+    description = "Keyword or regex search across vault files. Returns path:lineno:line per hit, capped at 100 hits by default."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Plain string by default; regex when regex=true."},
+            "path": {"type": "string", "description": "Subdir or file to search (vault-relative). Empty = vault root."},
+            "regex": {"type": "boolean", "description": "Treat pattern as Python regex (default false)."},
+            "ignore_case": {"type": "boolean", "description": "Case-insensitive match (default false)."},
+            "max_hits": {"type": "integer", "description": "Cap on number of hits (default 100)."},
+        },
+        "required": ["pattern"],
+    }
+    requires = ("config",)
+
+    async def run(self, args, ctx):
+        import re
+        from pathlib import Path
+
+        pattern_str = args.get("pattern", "")
+        if not pattern_str:
+            return "Error: 'pattern' parameter is required."
+        path = (args.get("path") or "").strip()
+        as_regex = bool(args.get("regex", False))
+        ignore_case = bool(args.get("ignore_case", False))
+        max_hits = max(1, min(int(args.get("max_hits", 100)), 1000))
+
+        vault = ctx.agent.config.vault_path
+        if path:
+            resolved = resolve_safe(vault, path)
+            if resolved is None:
+                return f"Error: path escapes outside vault: {path}"
+            if is_system_path(path):
+                return f"Error: system path is not searchable: {path}"
+        else:
+            resolved = vault.resolve()
+        if not resolved.exists():
+            return f"Path not found: {path or '/'}"
+
+        flags = re.IGNORECASE if ignore_case else 0
+        try:
+            if as_regex:
+                regex = re.compile(pattern_str, flags)
+            else:
+                regex = re.compile(re.escape(pattern_str), flags)
+        except re.error as exc:
+            return f"Error: invalid regex: {exc}"
+
+        targets: list[Path] = []
+        if resolved.is_file():
+            targets = [resolved]
+        else:
+            for p in resolved.rglob("*"):
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(vault.resolve())
+                if any(part.startswith("_") for part in rel.parts):
+                    continue
+                targets.append(p)
+
+        hits = []
+        for target in targets:
+            if len(hits) >= max_hits:
+                break
+            try:
+                with target.open("r", errors="replace") as f:
+                    for lineno, line in enumerate(f, start=1):
+                        if regex.search(line):
+                            rel = target.relative_to(vault.resolve())
+                            hits.append(f"{rel}:{lineno}: {line.rstrip()}")
+                            if len(hits) >= max_hits:
+                                break
+            except OSError:
+                continue
+        if not hits:
+            return f"No match for: {pattern_str}"
+        if len(hits) >= max_hits:
+            hits.append(f"[output truncated: hit cap of {max_hits} reached]")
+        return cap_output("\n".join(hits))
