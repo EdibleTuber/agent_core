@@ -103,3 +103,68 @@ class Tail(Tool):
         with resolved.open("r", errors="replace") as f:
             tail = deque(f, maxlen=n)
         return cap_output("\n".join(line.rstrip("\n") for line in tail))
+
+
+class Ls(Tool):
+    name = "ls"
+    description = "List files and subdirectories in a vault directory. Capped at 500 entries."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Vault-relative directory path; empty for root."},
+            "show_hidden": {"type": "boolean", "description": "Show _-prefixed entries (default false)."},
+            "long": {"type": "boolean", "description": "Include size and mtime per entry (default false)."},
+        },
+        "required": [],
+    }
+    requires = ("config",)
+
+    async def run(self, args, ctx):
+        from datetime import datetime, timezone
+
+        path = (args.get("path") or "").strip()
+        show_hidden = bool(args.get("show_hidden", False))
+        long_fmt = bool(args.get("long", False))
+        max_entries = 500
+
+        vault = ctx.agent.config.vault_path
+        if path:
+            if is_system_path(path) and not show_hidden:
+                return f"Error: system path is not listable without show_hidden: {path}"
+            resolved = resolve_safe(vault, path)
+            if resolved is None:
+                return f"Error: path escapes outside vault: {path}"
+        else:
+            resolved = vault.resolve()
+        if not resolved.exists():
+            return f"Directory not found: {path or '/'}"
+        if not resolved.is_dir():
+            return f"Not a directory: {path or '/'}"
+
+        try:
+            entries = sorted(resolved.iterdir(), key=lambda p: p.name)
+        except OSError as exc:
+            return f"Error listing {path or '/'}: {exc}"
+
+        out_lines = []
+        truncated = False
+        for entry in entries:
+            if not show_hidden and entry.name.startswith("_"):
+                continue
+            if len(out_lines) >= max_entries:
+                truncated = True
+                break
+            display = entry.name + ("/" if entry.is_dir() else "")
+            if long_fmt:
+                try:
+                    st = entry.stat()
+                    size = st.st_size
+                    mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                    out_lines.append(f"{size:>10} {mtime} {display}")
+                except OSError:
+                    out_lines.append(f"         ?           ? {display}")
+            else:
+                out_lines.append(display)
+        if truncated:
+            out_lines.append(f"[output truncated: more than {max_entries} entries]")
+        return cap_output("\n".join(out_lines))
