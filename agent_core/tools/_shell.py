@@ -250,3 +250,93 @@ class Grep(Tool):
         if len(hits) >= max_hits:
             hits.append(f"[output truncated: hit cap of {max_hits} reached]")
         return cap_output("\n".join(hits))
+
+
+class Find(Tool):
+    name = "find"
+    description = "Filename glob search. Patterns like 'agent-*.md' or '**/quantum*'. Capped at 500 results."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Glob pattern."},
+            "path": {"type": "string", "description": "Subdir to search (vault-relative). Empty = vault root."},
+            "type": {"type": "string", "description": "'f' for files, 'd' for dirs, '' for both (default)."},
+            "max_results": {"type": "integer", "description": "Cap on number of results (default 500)."},
+        },
+        "required": ["pattern"],
+    }
+    requires = ("config",)
+
+    async def run(self, args, ctx):
+        pattern = args.get("pattern", "")
+        if not pattern:
+            return "Error: 'pattern' parameter is required."
+        path = (args.get("path") or "").strip()
+        type_filter = (args.get("type") or "").strip()
+        max_results = max(1, min(int(args.get("max_results", 500)), 5000))
+
+        vault = ctx.agent.config.vault_path
+        if path:
+            resolved = resolve_safe(vault, path)
+            if resolved is None:
+                return f"Error: path escapes outside vault: {path}"
+        else:
+            resolved = vault.resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            return f"Directory not found: {path or '/'}"
+
+        results = []
+        for p in resolved.rglob(pattern):
+            rel = p.relative_to(vault.resolve())
+            if any(part.startswith("_") for part in rel.parts):
+                continue
+            if type_filter == "f" and not p.is_file():
+                continue
+            if type_filter == "d" and not p.is_dir():
+                continue
+            results.append(str(rel))
+            if len(results) >= max_results:
+                break
+        if not results:
+            return f"No match for: {pattern}"
+        if len(results) >= max_results:
+            results.append(f"[output truncated: result cap of {max_results} reached]")
+        return cap_output("\n".join(results))
+
+
+class ReadLines(Tool):
+    name = "read_lines"
+    description = "Read a specific 1-indexed line range from a vault file. Pairs with grep hits."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Vault-relative file path."},
+            "start": {"type": "integer", "description": "Starting line number (1-indexed, inclusive)."},
+            "end": {"type": "integer", "description": "Ending line number (1-indexed, inclusive)."},
+        },
+        "required": ["path", "start", "end"],
+    }
+    requires = ("config",)
+
+    async def run(self, args, ctx):
+        resolved, err = _read_safe(args, ctx.agent.config.vault_path)
+        if err is not None:
+            return err
+        try:
+            start = int(args["start"])
+            end = int(args["end"])
+        except (KeyError, TypeError, ValueError):
+            return "Error: 'start' and 'end' integers are required."
+        if start < 1 or end < start:
+            return f"Error: invalid line range: start={start}, end={end}."
+        out = []
+        with resolved.open("r", errors="replace") as f:
+            for lineno, line in enumerate(f, start=1):
+                if lineno < start:
+                    continue
+                if lineno > end:
+                    break
+                out.append(f"{lineno}: {line.rstrip()}")
+        if not out:
+            return f"No lines in range {start}..{end}."
+        return cap_output("\n".join(out))
