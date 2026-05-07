@@ -1,8 +1,9 @@
 """run_daemon: the agent_core entry point.
 
 Constructs framework managers from BaseConfig, populates them on the agent,
-calls Agent.setup() to let the agent construct domain-specific resources,
-then starts the daemon.
+attaches tool_executor / command_registry / prompt_builder built from the
+agent's class-level registration, calls Agent.setup() to let the agent
+construct domain-specific resources, then starts the daemon.
 """
 from __future__ import annotations
 
@@ -19,16 +20,52 @@ from agent_core.inference import InferenceClient
 from agent_core.learning import LearningManager
 from agent_core.profile import ProfileManager
 from agent_core.retrieval import RetrievalClient
+from agent_core.utils.fetcher import URLFetcher
 from agent_core.websearch import WebSearchClient
 from agent_core.wisdom import WisdomManager
 
 logger = logging.getLogger(__name__)
 
 
+def _attach_registries(agent) -> None:
+    """Build tool_executor, command_registry, prompt_builder from agent's
+    class-level tools/commands/disabled_builtins. Validation of `requires`
+    happens here, before Agent.setup() runs — misconfiguration fails fast at
+    boot, not at first user message.
+    """
+    from agent_core.commands.registry import CommandRegistry
+    from agent_core.prompts.builder import SystemPromptBuilder
+    from agent_core.tools.executor import ToolExecutor
+
+    cls = type(agent)
+    agent.tool_executor = ToolExecutor.build(
+        agent,
+        list(cls.tools),
+        disabled=cls.disabled_builtins,
+    )
+    # Pre-assign a sentinel so that commands requiring "command_registry"
+    # (e.g. Help) pass the hasattr check at build time. The real registry
+    # replaces it immediately below.
+    agent.command_registry = None
+    agent.command_registry = CommandRegistry.build(
+        agent,
+        list(cls.commands),
+        disabled=cls.disabled_builtins,
+    )
+    agent.prompt_builder = SystemPromptBuilder(
+        profile=agent.profile,
+        wisdom=agent.wisdom,
+        channels=agent.channels,
+        tool_executor=agent.tool_executor,
+        command_registry=agent.command_registry,
+        agent=agent,
+    )
+
+
 def run_daemon(
     agent: Agent, config_cls: type[BaseConfig] = BaseConfig,
 ) -> None:
-    """Construct managers, wire onto agent, call setup, start daemon."""
+    """Construct managers, wire onto agent, attach registries, call setup, start daemon."""
     config = load_config(
         config_cls, agent_name=agent.name, env_prefix=agent.env_prefix,
     )
@@ -52,6 +89,13 @@ def run_daemon(
         base_url=config.inference_url, collection_id=config.collection_id,
     )
     agent.websearch = WebSearchClient(base_url=config.searxng_url)
+    agent.fetcher = URLFetcher(
+        max_bytes=config.fetch_max_bytes,
+        timeout=config.fetch_timeout,
+    )
+
+    _attach_registries(agent)
+
     agent.setup()
 
     logging.basicConfig(level=logging.INFO)
