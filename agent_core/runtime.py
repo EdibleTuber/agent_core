@@ -1,9 +1,10 @@
 """run_daemon: the agent_core entry point.
 
 Constructs framework managers from BaseConfig, populates them on the agent,
-attaches tool_executor / command_registry / prompt_builder built from the
-agent's class-level registration, calls Agent.setup() to let the agent
-construct domain-specific resources, then starts the daemon.
+calls Agent.setup() to let the agent construct domain-specific resources,
+then attaches tool_executor / command_registry / prompt_builder (validated
+against the agent's full attribute set — framework + domain), then starts
+the daemon.
 """
 from __future__ import annotations
 
@@ -30,8 +31,9 @@ logger = logging.getLogger(__name__)
 def _attach_registries(agent) -> None:
     """Build tool_executor, command_registry, prompt_builder from agent's
     class-level tools/commands/disabled_builtins. Validation of `requires`
-    happens here, before Agent.setup() runs — misconfiguration fails fast at
-    boot, not at first user message.
+    happens here, after Agent.setup() has run — so domain managers constructed
+    in setup() (e.g. wiki, reorganizer, compiler) are visible to `requires`
+    checks. Misconfiguration still fails fast at boot, before any user message.
     """
     from agent_core.commands.registry import CommandRegistry
     from agent_core.prompts.builder import SystemPromptBuilder
@@ -65,7 +67,15 @@ def _attach_registries(agent) -> None:
 def run_daemon(
     agent: Agent, config_cls: type[BaseConfig] = BaseConfig,
 ) -> None:
-    """Construct managers, wire onto agent, attach registries, call setup, start daemon."""
+    """Construct managers, wire onto agent, call setup, attach registries, start daemon.
+
+    Order:
+    1. Framework managers (config, profile, wisdom, etc.) wired onto agent.
+    2. agent.setup() — agent constructs domain-specific resources.
+    3. _attach_registries() — validates `requires` against full agent state,
+       builds tool_executor / command_registry / prompt_builder.
+    4. Daemon starts.
+    """
     config = load_config(
         config_cls, agent_name=agent.name, env_prefix=agent.env_prefix,
     )
@@ -94,9 +104,9 @@ def run_daemon(
         timeout=config.fetch_timeout,
     )
 
-    _attach_registries(agent)
-
     agent.setup()
+
+    _attach_registries(agent)
 
     logging.basicConfig(level=logging.INFO)
     daemon = Daemon(agent)

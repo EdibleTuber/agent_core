@@ -97,9 +97,11 @@ def test_run_daemon_wires_fetcher(monkeypatch, tmp_path):
     assert captured["timeout"] == BaseConfig().fetch_timeout        # default 30
 
 
-def test_run_daemon_attaches_executor_registry_prompt_builder(monkeypatch, tmp_path):
-    """_attach_registries builds tool_executor, command_registry, and prompt_builder
-    before setup() is called."""
+def test_run_daemon_attaches_registries_after_setup(monkeypatch, tmp_path):
+    """After v0.6.1, _attach_registries runs after agent.setup() so tool/command
+    `requires` declarations can validate against domain managers constructed in
+    setup. Setup itself does NOT see the registries — they are attached immediately
+    after setup returns. The registries ARE present on the agent after run_daemon."""
     from agent_core.tools.base import Tool
 
     class _ProbeTool(Tool):
@@ -117,21 +119,67 @@ def test_run_daemon_attaches_executor_registry_prompt_builder(monkeypatch, tmp_p
         tools = [_ProbeTool]
 
         def setup(self):
-            captured["has_executor"] = hasattr(self, "tool_executor")
-            captured["has_registry"] = hasattr(self, "command_registry")
-            captured["has_prompt_builder"] = hasattr(self, "prompt_builder")
-            captured["probe_in_executor"] = "probe_tool" in self.tool_executor.names()
+            # At setup() time, registries have NOT been attached yet.
+            captured["setup_saw_executor"] = hasattr(self, "tool_executor")
+            captured["setup_saw_registry"] = hasattr(self, "command_registry")
+            captured["setup_saw_prompt_builder"] = hasattr(self, "prompt_builder")
 
     monkeypatch.setenv("PROBEAT_VAULT_PATH", str(tmp_path))
     monkeypatch.setenv("PROBEAT_SOCKET_PATH", str(tmp_path / "probeat.sock"))
 
     with patch("agent_core.runtime.asyncio.run"):
-        run_daemon(_ProbeAgent())
+        agent = _ProbeAgent()
+        run_daemon(agent)
 
-    assert captured["has_executor"]
-    assert captured["has_registry"]
-    assert captured["has_prompt_builder"]
-    assert captured["probe_in_executor"]
+    # setup() ran before _attach_registries, so it saw none of them.
+    assert captured["setup_saw_executor"] is False
+    assert captured["setup_saw_registry"] is False
+    assert captured["setup_saw_prompt_builder"] is False
+
+    # After run_daemon returns, all three are attached and the tool is registered.
+    assert hasattr(agent, "tool_executor")
+    assert hasattr(agent, "command_registry")
+    assert hasattr(agent, "prompt_builder")
+    assert "probe_tool" in agent.tool_executor.names()
+
+
+def test_attach_registries_validates_domain_managers_set_in_setup(monkeypatch, tmp_path):
+    """A tool requiring a domain manager constructed in setup() now validates
+    cleanly. Before v0.6.1 this would have raised RuntimeError at registration
+    because _attach_registries ran before setup() had a chance to set the attr."""
+    from unittest.mock import MagicMock
+
+    from agent_core.tools.base import Tool
+
+    class _NeedsDomain(Tool):
+        name = "needs_domain"
+        description = ""
+        parameters = {}
+        requires = ("compiler",)  # constructed in setup, not by run_daemon
+
+        async def run(self, args, ctx):
+            return "ok"
+
+    captured = {}
+
+    class _DomainAgent(Agent):
+        name = "domain-agent"
+        tools = [_NeedsDomain]
+
+        def setup(self):
+            self.compiler = MagicMock()
+            captured["setup_set_compiler"] = True
+
+    monkeypatch.setenv("DOMAIN_AGENT_VAULT_PATH", str(tmp_path))
+    monkeypatch.setenv("DOMAIN_AGENT_SOCKET_PATH", str(tmp_path / "domain-agent.sock"))
+
+    with patch("agent_core.runtime.asyncio.run"):
+        agent = _DomainAgent()
+        # Should not raise — _attach_registries now sees self.compiler.
+        run_daemon(agent)
+
+    assert captured["setup_set_compiler"] is True
+    assert "needs_domain" in agent.tool_executor.names()
 
 
 def test_attach_registries_fails_when_required_attr_missing():
