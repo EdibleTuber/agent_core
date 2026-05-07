@@ -79,8 +79,17 @@ class Daemon:
 
                 channel_id = resolve_channel_id(getattr(msg, "channel_id", None))
                 conv = await self.agent.channels.get_or_create(channel_id)
+
+                async def _emit(message, _writer=writer):
+                    _writer.write(encode_message(message))
+                    await _writer.drain()
+
                 ctx = HandlerContext(
-                    conversation=conv, channel_id=channel_id, writer=writer,
+                    conversation=conv,
+                    channel_id=channel_id,
+                    writer=writer,
+                    agent=self.agent,
+                    emit=_emit,
                 )
 
                 if isinstance(msg, ChatMessage):

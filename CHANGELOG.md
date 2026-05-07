@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.6.0] - 2026-05-06
+
+### Added
+- `agent_core.tools` subpackage: `Tool` base class with `name`/`description`/`parameters`/`requires` ClassVars and `async def run(args, ctx) -> str`. `to_openai_schema()` classmethod returns OpenAI function-calling format.
+- `agent_core.tools.executor.ToolExecutor` with `build()` classmethod that unions builtins with agent-supplied tool classes, validates `requires` against agent attributes via `hasattr`, and instantiates the surviving classes. Generic dispatch with exception containment; `asyncio.CancelledError` re-raised explicitly so cancellation propagates.
+- 12 builtin tools in `agent_core.tools.builtin.BUILTIN_TOOLS`:
+  - 7 read-only shell tools, vault-scoped, pure-Python: `cat`, `head`, `tail`, `ls`, `grep`, `find`, `read_lines`. 32 KB output cap (`OUTPUT_CAP_BYTES`); system paths (`_`-prefixed) rejected.
+  - 5 framework-manager-backed: `fetch_url`, `search_vault`, `search_web`, `update_scratch`, `add_learning`.
+- `agent_core.commands` subpackage: `Command` base class and `CommandRegistry` with the same `build()` validation pattern. `dispatch()` yields zero or more messages from the chosen command's async generator.
+- 12 builtin commands in `agent_core.commands.builtin.BUILTIN_COMMANDS`: `help`, `clear`, `status`, `profile`, `scratch`, `wisdom`, `learnings`, `promote`, `rate`, `model`, `think`, `quit`. Each is a thin wrapper over a framework manager.
+- `agent_core.prompts.builder.SystemPromptBuilder` with section render helpers: `render_profile()`, `render_wisdom()`, `render_scratchpad(channel_id)`, `render_commands_catalog()`, `render_tools_catalog()`. Each returns an empty string when underlying data is empty so callers can `filter(None, ...)` freely.
+- `Agent` ClassVars: `tools = []`, `commands = []`, `disabled_builtins = frozenset()` for declarative registration with opt-out by name.
+- `HandlerContext` fields: `agent` (back-reference for tools accessing `ctx.agent.X`) and `emit` (NDJSON-encoding writer callback for tools sending out-of-band messages mid-call). Both default to `None`; populated per turn by `Daemon._handle_connection`.
+- `agent_core.runtime._attach_registries(agent)` builds `tool_executor`, `command_registry`, and `prompt_builder` from the agent's class-level registration, validates `requires` against the agent's attributes, and attaches all three before `Agent.setup()` runs. Misconfiguration fails fast at boot.
+- `agent_core.runtime.run_daemon` now constructs a `URLFetcher(max_bytes=config.fetch_max_bytes, timeout=config.fetch_timeout)` and attaches it as `agent.fetcher` alongside the other framework managers, so the `fetch_url` builtin works out of the box.
+- Contract tests pinning the registration API surface from a consumer's perspective.
+
+### Notes
+- Builtin tools and commands are opt-out via `Agent.disabled_builtins`; the default set is enabled in every agent that doesn't override it.
+- `requires` validation is shallow (`hasattr`-based). Type-safe validation via Protocols is deferred to a future phase.
+- Downstream agents that previously constructed their own `URLFetcher` in `setup()` can now drop that and rely on the framework default. Agents that want different fetch settings can still override `self.fetcher` in `setup()`.
+- The `requires` of `Help` is `("command_registry",)` and the registry isn't attached when `CommandRegistry.build()` validates — `_attach_registries` sets a `None` sentinel before building so the `hasattr` check passes; the real registry overwrites it on the next line. The `Help` command only reads `command_registry` at dispatch time, so the sentinel is never user-visible.
+- Phase G (next) is the Discord gateway adapter extraction.
+
 ## [0.5.1] - 2026-04-30
 
 ### Added

@@ -10,24 +10,37 @@ resources.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import AsyncIterator, ClassVar
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, AsyncIterator, ClassVar
 
 from agent_core.config import BaseConfig
 from agent_core.conversation import Conversation
+
+if TYPE_CHECKING:
+    from agent_core.tools.base import Tool
+    from agent_core.commands.base import Command
 
 
 @dataclass
 class HandlerContext:
     """Per-turn context passed to handle_chat / handle_command.
 
-    Carries the live Conversation, the resolved channel_id, and an
-    `asyncio.StreamWriter` reference for streaming partial responses
-    (StreamChunkMessage etc.) to the connected client mid-turn.
+    Carries the live Conversation, the resolved channel_id, the
+    asyncio.StreamWriter for streaming partial responses, the back-reference
+    to the Agent (for tools and commands accessing ctx.agent.X), and an
+    awaitable `emit` callable that NDJSON-encodes a message and writes it
+    to the connection.
+
+    `agent` and `emit` default to None so existing call sites (notably the
+    Daemon constructed HandlerContext in earlier Phase E code paths and the
+    test fixtures) keep working. Daemon._handle_connection populates them
+    on every new connection / turn.
     """
     conversation: Conversation
     channel_id: str
-    writer: object   # asyncio.StreamWriter; framework-internal
+    writer: object          # asyncio.StreamWriter; framework-internal
+    agent: object = None    # Agent; populated by Daemon._handle_connection
+    emit: object = None     # Callable[[object], Awaitable[None]]; populated by Daemon
 
 
 class Agent:
@@ -37,13 +50,26 @@ class Agent:
         name: short slug for the agent (e.g. "pal", "re-lab")
         env_prefix: optional explicit env var prefix; if None, derived from name
 
+    Class-level registration (defaults are empty; opt-out via disabled_builtins):
+        tools: list of Tool subclasses to register on top of BUILTIN_TOOLS
+        commands: list of Command subclasses to register on top of BUILTIN_COMMANDS
+        disabled_builtins: names to remove from both registries
+
     Framework attributes (populated by run_daemon before setup):
         config, profile, wisdom, learning, allowlist, approval_registry,
-        channels, inference, retrieval, websearch
+        channels, inference, retrieval, websearch, fetcher
+
+    Registration attributes (populated by run_daemon._attach_registries before setup):
+        tool_executor, command_registry, prompt_builder
     """
 
     name: ClassVar[str]
     env_prefix: ClassVar[str | None] = None
+
+    # New in v0.6.0: declarative tool/command registration with opt-out.
+    tools: ClassVar[list[type["Tool"]]] = []
+    commands: ClassVar[list[type["Command"]]] = []
+    disabled_builtins: ClassVar[frozenset[str]] = frozenset()
 
     config: BaseConfig
 
