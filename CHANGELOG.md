@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1] - 2026-05-07
+
+### Changed
+- `run_daemon` now calls `Agent.setup()` BEFORE `_attach_registries`. Tool and command `requires` declarations can now reference domain managers constructed in `setup()` (e.g. PAL's `wiki`, `reorganizer`, `compiler`), not just framework managers wired by `run_daemon`. Registration-time validation still fails fast -- before any user message -- but now validates against the agent's full attribute set.
+
+### Notes
+- Trade-off: `Agent.setup()` no longer sees `tool_executor` / `command_registry` / `prompt_builder` attached. Setup is for constructing domain resources; the registries are built afterwards from the union of framework + domain state.
+- Downstream impact: agents whose `setup()` was *reading* from the registries (none known to do this -- PAL doesn't) need to move that logic into a new override point or after `run_daemon` returns. Agents that simply *construct* domain resources in setup (PAL, the canonical case) work better than before -- domain-dependency tools now validate at boot.
+
 ## [0.6.0] - 2026-05-06
 
 ### Added
