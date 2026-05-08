@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.0] - 2026-05-07
+
+### Added
+- `agent_core.adapters.discord_gateway` module: composition helpers lifted from PAL's discord_adapter. Includes `UserConnectionManager` (per-user DaemonConnection lifecycle), `parse_discord_message` (`!cmd` vs chat split), `rewrite_slash_prefixes` (`/cmd` -> `!cmd` with code-fence protection), `split_message` (2000-char Discord limit), `format_tool_progress` (italic-wrapped tool label with optional per-tool custom_formatters dict).
+- The module is pure-Python helpers -- no `import discord` at module level. Bot classes (discord.Client subclasses) stay in consumer code; this module is composition primitives.
+
+### Notes
+- Phase G ships the generic ~250 LOC. PAL retains `PalDiscordBot` plus its approval UX (button/modal handlers, proposal threads) since those are PAL-specific. A second Discord-using agent supplies its own bot class and uses these helpers directly.
+- The `agent_core[discord]` extras_require remains for consumers that want discord.py installed transitively; this module itself doesn't depend on it.
+
 ## [0.6.1] - 2026-05-07
 
 ### Changed
