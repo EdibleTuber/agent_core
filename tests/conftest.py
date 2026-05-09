@@ -101,11 +101,26 @@ async def mock_page_with_code(request: Request):
     )
 
 
+_FAKE_USAGE = {"prompt_tokens": 42, "completion_tokens": 8, "total_tokens": 50}
+
+
+def _usage_chunk(model: str) -> str:
+    """Final SSE chunk with empty choices and a usage block (OpenAI shape)."""
+    payload = {
+        "choices": [],
+        "usage": _FAKE_USAGE,
+        "model": model,
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+
 async def mock_chat_completions(request: Request):
     """Mock OpenAI-compatible /v1/chat/completions endpoint."""
     body = await request.json()
     REQUEST_LOG.append(body)
     stream = body.get("stream", False)
+    include_usage = bool(body.get("stream_options", {}).get("include_usage"))
+    model = body.get("model", "test-model")
     messages = body.get("messages", [])
     last_user = next(
         (m["content"] for m in reversed(messages) if m["role"] == "user"),
@@ -120,7 +135,9 @@ async def mock_chat_completions(request: Request):
         summary = tool_content[:50] if tool_content else "no content"
         if not stream:
             return JSONResponse({
-                "choices": [{"message": {"role": "assistant", "content": f"Tool result: {summary}"}}]
+                "choices": [{"message": {"role": "assistant", "content": f"Tool result: {summary}"}}],
+                "usage": _FAKE_USAGE,
+                "model": model,
             })
         async def generate_after_tool():
             text = f"Tool result: {summary}"
@@ -134,6 +151,8 @@ async def mock_chat_completions(request: Request):
                     }]
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
+            if include_usage:
+                yield _usage_chunk(model)
             yield "data: [DONE]\n\n"
         return StreamingResponse(generate_after_tool(), media_type="text/event-stream")
 
@@ -156,7 +175,9 @@ async def mock_chat_completions(request: Request):
                         }],
                     },
                     "finish_reason": "tool_calls",
-                }]
+                }],
+                "usage": _FAKE_USAGE,
+                "model": model,
             })
         async def generate_tool():
             chunk = {
@@ -194,6 +215,8 @@ async def mock_chat_completions(request: Request):
                 "choices": [{"delta": {}, "finish_reason": "tool_calls"}]
             }
             yield f"data: {json.dumps(done_chunk)}\n\n"
+            if include_usage:
+                yield _usage_chunk(model)
             yield "data: [DONE]\n\n"
         return StreamingResponse(generate_tool(), media_type="text/event-stream")
 
@@ -208,12 +231,16 @@ async def mock_chat_completions(request: Request):
                         "reasoning_content": f"thinking about {actual_query}",
                     },
                     "finish_reason": "stop",
-                }]
+                }],
+                "usage": _FAKE_USAGE,
+                "model": model,
             })
 
     if not stream:
         return JSONResponse({
-            "choices": [{"message": {"role": "assistant", "content": f"echo: {last_user}"}}]
+            "choices": [{"message": {"role": "assistant", "content": f"echo: {last_user}"}}],
+            "usage": _FAKE_USAGE,
+            "model": model,
         })
 
     async def generate():
@@ -227,6 +254,8 @@ async def mock_chat_completions(request: Request):
                 }]
             }
             yield f"data: {json.dumps(chunk)}\n\n"
+        if include_usage:
+            yield _usage_chunk(model)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")

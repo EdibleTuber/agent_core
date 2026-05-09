@@ -41,11 +41,27 @@ class ToolCall:
 
 
 @dataclass
+class Usage:
+    """Token usage reported by the inference server for a single completion.
+
+    Populated from the OpenAI-compatible `usage` block on completion responses.
+    For streaming, requires `stream_options.include_usage=true` in the request;
+    most OpenAI-compatible servers (including llama-server) emit a final SSE
+    chunk with `choices=[]` and a populated `usage` field.
+    """
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    model: str | None = None
+
+
+@dataclass
 class CompletionResult:
     type: str  # "text" or "tool_calls"
     content: str | None = None
     tool_calls: list[ToolCall] | None = None
     reasoning: str | None = None
+    usage: Usage | None = None
 
 
 @dataclass
@@ -56,6 +72,28 @@ class StreamEnd:
     """
     finish_reason: str   # "stop" | "length" | "tool_calls" | "content_filter" | "unknown"
     chunks_yielded: int
+    usage: Usage | None = None
+
+
+def _parse_usage(data: dict, fallback_model: str | None = None) -> Usage | None:
+    """Build a Usage from an OpenAI-compatible response or final stream chunk.
+
+    Returns None if the `usage` block is absent or unparseable. The model
+    field falls back to `fallback_model` when the response doesn't echo it
+    (some servers omit it on streamed usage chunks).
+    """
+    block = data.get("usage")
+    if not isinstance(block, dict):
+        return None
+    try:
+        return Usage(
+            prompt_tokens=int(block.get("prompt_tokens", 0)),
+            completion_tokens=int(block.get("completion_tokens", 0)),
+            total_tokens=int(block.get("total_tokens", 0)),
+            model=data.get("model") or fallback_model,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 class InferenceClient:
@@ -163,6 +201,12 @@ class InferenceClient:
         resp = await self._post_with_retry(payload)
         data = resp.json()
         message = data["choices"][0]["message"]
+        usage = _parse_usage(data, resolved_model)
+        if usage is not None:
+            logger.info(
+                "inference complete model=%s prompt=%d completion=%d total=%d",
+                usage.model, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+            )
 
         raw_calls = message.get("tool_calls")
         if raw_calls:
@@ -177,13 +221,14 @@ class InferenceClient:
                     name=func["name"],
                     arguments=args,
                 ))
-            return CompletionResult(type="tool_calls", tool_calls=parsed)
+            return CompletionResult(type="tool_calls", tool_calls=parsed, usage=usage)
 
         reasoning_text = extract_reasoning(data)
         return CompletionResult(
             type="text",
             content=message.get("content", ""),
             reasoning=reasoning_text,
+            usage=usage,
         )
 
     async def stream(
@@ -206,7 +251,12 @@ class InferenceClient:
         signals end-of-stream.
         """
         resolved_model = model or self.default_model
-        payload: dict = {"model": resolved_model, "messages": messages, "stream": True}
+        payload: dict = {
+            "model": resolved_model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -222,6 +272,7 @@ class InferenceClient:
         is_tool_response = False
         chunks_yielded = 0
         finish_reason = "unknown"
+        usage: Usage | None = None
         url = f"{self.base_url}/v1/chat/completions"
 
         async with self._stream_with_retry(url, payload) as resp:
@@ -232,6 +283,15 @@ class InferenceClient:
                 if data == "[DONE]":
                     break
                 chunk = json.loads(data)
+
+                # Servers emitting include_usage send a final chunk with
+                # choices=[] and a populated usage block. Capture and skip.
+                if not chunk.get("choices"):
+                    parsed = _parse_usage(chunk, resolved_model)
+                    if parsed is not None:
+                        usage = parsed
+                    continue
+
                 choice = chunk["choices"][0]
                 if choice.get("finish_reason"):
                     finish_reason = choice["finish_reason"]
@@ -265,6 +325,13 @@ class InferenceClient:
                     chunks_yielded += 1
                     yield content
 
+        if usage is not None:
+            logger.info(
+                "inference stream model=%s prompt=%d completion=%d total=%d finish=%s",
+                usage.model, usage.prompt_tokens, usage.completion_tokens,
+                usage.total_tokens, finish_reason,
+            )
+
         # If we accumulated tool calls, yield them as a single list
         if is_tool_response and tool_call_acc:
             calls = []
@@ -279,4 +346,8 @@ class InferenceClient:
             yield calls
         else:
             # Text-output path: emit a sentinel describing how the stream ended.
-            yield StreamEnd(finish_reason=finish_reason, chunks_yielded=chunks_yielded)
+            yield StreamEnd(
+                finish_reason=finish_reason,
+                chunks_yielded=chunks_yielded,
+                usage=usage,
+            )
