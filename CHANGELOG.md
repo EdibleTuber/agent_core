@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.0.0] - 2026-05-09
+
+### Milestone
+
+The agent_core extraction is complete. The framework's API surface — `Agent` base class, `BaseConfig`, `run_daemon`, `Tool` / `Command` / `SystemPromptBuilder`, the per-channel managers, the protocol layer, the Discord gateway helpers — is stable enough to depend on. PAL has been migrated end-to-end and is the canonical consumer; `Agent_Template` (https://github.com/EdibleTuber/agent_template) provides a starter scaffold for the next agent.
+
+This is a tag, not a feature release. Code is identical to v0.7.0 except for the version bump and this entry. The 1.0 number reserves the right to break the API in a future major; from here, minor bumps preserve the public contract.
+
+### What's in v1.0
+
+- `Agent` base class with `tools` / `commands` / `disabled_builtins` ClassVars + `setup()` / `system_prompt(ctx)` / `handle_chat` / `handle_command` / `handle_other` extension points.
+- `BaseConfig` (16 fields covering inference, retrieval, allowlist/web-search, channels, scratchpad, fetcher, batch).
+- `run_daemon(agent)`: constructs framework managers + URLFetcher, calls `agent.setup()`, attaches `tool_executor` / `command_registry` / `prompt_builder` (via `_attach_registries`), then serves the daemon.
+- `agent_core.tools`: Tool base, ToolExecutor with `requires`-validation + exception containment + asyncio.CancelledError reraise; 12 builtins (cat / head / tail / ls / grep / find / read_lines / fetch_url / search_vault / search_web / update_scratch / add_learning).
+- `agent_core.commands`: Command base, CommandRegistry, 12 builtins (help / clear / status / profile / scratch / wisdom / learnings / promote / rate / model / think / quit).
+- `agent_core.prompts.SystemPromptBuilder` with `render_profile` / `render_wisdom` / `render_scratchpad(channel_id)` / `render_commands_catalog` / `render_tools_catalog`.
+- `agent_core.adapters.discord_gateway`: pure-Python composition helpers for Discord-using agents (UserConnectionManager, parse, split, rewrite, format).
+- `agent_core.protocol`: NDJSON transport, message primitives, agent-extensible registry.
+- `agent_core.channels` / `scratchpad` / `conversation` / `learning_scanner` / `git_helpers`: per-channel state.
+- `agent_core.profile` / `wisdom` / `learning` / `allowlist` / `approval_registry`: per-agent stateful managers.
+- `agent_core.inference` / `retrieval` / `websearch`: stateless HTTP clients.
+- `agent_core.utils`: frontmatter, chunker, sanitizer, fetcher (URLFetcher with allowlist + content-type gating), converter.
+
+### Test count
+
+525 tests passing (340 baseline pre-extraction → +185 across Phases A-G).
+
+### Phases recap
+
+| Phase | Tag | What |
+|---|---|---|
+| A | v0.1.x | leaf utilities |
+| B | v0.2.0 | stateless clients (inference / retrieval / websearch / reasoning) |
+| C | v0.3.0 | stateful managers (wisdom / learning / profile / allowlist / approval_registry) |
+| D | v0.4.0 | per-channel state (conversation / channels / scratchpad / learning_scanner) + protocol package |
+| E | v0.5.x | runtime infrastructure (Agent / BaseConfig / run_daemon / Daemon / DaemonConnection / CLI adapter) |
+| F | v0.6.x | tool/command/prompt scaffolding + 12 tool + 12 command builtins; v0.6.1 fixes registries-before-setup ordering |
+| G | v0.7.0 | discord_gateway helpers |
+| H | (consumer-side) | Agent_Template scaffold, validates the API surface |
+
+### What's next
+
+- Phase I (burn-in): use the framework + template for real work; file follow-ups for rough edges.
+- The `_BasePALPromptAdapter` shim in PAL (PR6) is a known smell — Compiler/Consolidator are constructed in `setup()` before `_attach_registries` and need a base-prompt builder at construction. A future Agent extension point (`pre_setup`?) might let it go away.
+- Inference safety guards (per-channel preemption, structured logging, forensic JSONL) deferred from Phase D — resumes after burn-in.
+
 ## [0.7.0] - 2026-05-07
 
 ### Added
