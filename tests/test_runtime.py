@@ -239,8 +239,9 @@ def test_attach_registries_includes_builtins():
     assert "fetch_url" in tool_names
 
     cmd_names = a.command_registry.names()
-    assert len(cmd_names) == 12
+    assert len(cmd_names) == 13
     assert "help" in cmd_names
     assert "quit" in cmd_names
+    assert "context" in cmd_names
 
     assert hasattr(a, "prompt_builder")

@@ -2,6 +2,7 @@
 from agent_core.commands.base import Command
 from agent_core.commands._builtin_impls import (
     Clear,
+    Context,
     Help,
     Learnings,
     Model,
@@ -19,6 +20,7 @@ BUILTIN_COMMANDS: list[type[Command]] = [
     Help,
     Clear,
     Status,
+    Context,
     Profile,
     Scratch,
     Wisdom,

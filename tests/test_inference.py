@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from agent_core.inference import InferenceClient, CompletionResult, StreamEnd, ToolCall
+from agent_core.inference import InferenceClient, CompletionResult, StreamEnd, ToolCall, Usage
 
 
 # Minimal tool definitions for tests. Mirrors the shape that PAL's full
@@ -327,3 +327,101 @@ async def test_stream_tool_calls_does_not_yield_streamend():
     # Last item is the tool-calls list, not a StreamEnd.
     assert isinstance(out[-1], list)
     assert all(not isinstance(x, StreamEnd) for x in out)
+
+
+# ---------------------------------------------------------------------------
+# Usage tracking (per-turn token counts).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_complete_attaches_usage(mock_inference_server):
+    """Non-streaming complete() returns Usage from the response's usage block."""
+    client = InferenceClient(base_url=mock_inference_server, model="test-model")
+    result = await client.complete(
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    assert isinstance(result.usage, Usage)
+    assert result.usage.prompt_tokens == 42
+    assert result.usage.completion_tokens == 8
+    assert result.usage.total_tokens == 50
+    assert result.usage.model == "test-model"
+
+
+@pytest.mark.asyncio
+async def test_complete_tool_call_attaches_usage(mock_inference_server):
+    """Tool-call responses also carry usage."""
+    client = InferenceClient(base_url=mock_inference_server, model="test-model")
+    result = await client.complete(
+        messages=[{"role": "user", "content": "TOOLCALL:cat"}],
+        tools=_TEST_TOOL_DEFINITIONS,
+    )
+    assert result.type == "tool_calls"
+    assert isinstance(result.usage, Usage)
+    assert result.usage.total_tokens == 50
+
+
+@pytest.mark.asyncio
+async def test_stream_request_includes_stream_options(mock_inference_server):
+    """stream() opts the request into include_usage so the server emits usage."""
+    from tests.conftest import REQUEST_LOG
+    client = InferenceClient(base_url=mock_inference_server, model="test-model")
+    async for _ in client.stream(messages=[{"role": "user", "content": "hi"}]):
+        pass
+    assert REQUEST_LOG[-1].get("stream_options") == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_stream_attaches_usage_to_streamend(mock_inference_server):
+    """The StreamEnd sentinel carries Usage when the server emits a usage chunk."""
+    client = InferenceClient(base_url=mock_inference_server, model="test-model")
+    end = None
+    async for item in client.stream(messages=[{"role": "user", "content": "hello"}]):
+        if isinstance(item, StreamEnd):
+            end = item
+    assert end is not None
+    assert isinstance(end.usage, Usage)
+    assert end.usage.prompt_tokens == 42
+    assert end.usage.completion_tokens == 8
+    assert end.usage.total_tokens == 50
+
+
+@pytest.mark.asyncio
+async def test_complete_handles_missing_usage():
+    """When the server omits usage, result.usage is None (not an error)."""
+    transport = httpx.MockTransport(lambda req: httpx.Response(
+        200,
+        json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+    ))
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=transport)
+
+    result = await client.complete(messages=[{"role": "user", "content": "hi"}])
+    assert result.type == "text"
+    assert result.usage is None
+
+
+@pytest.mark.asyncio
+async def test_stream_handles_missing_usage():
+    """When the server omits the usage chunk, StreamEnd.usage is None."""
+    async def fake_stream(request):
+        body = (
+            b'data: {"choices": [{"delta": {"content": "hi"}, "finish_reason": null}]}\n\n'
+            b'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=body,
+        )
+    transport = httpx.MockTransport(fake_stream)
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=transport)
+
+    end = None
+    async for item in client.stream(messages=[{"role": "user", "content": "hi"}]):
+        if isinstance(item, StreamEnd):
+            end = item
+    assert end is not None
+    assert end.usage is None
