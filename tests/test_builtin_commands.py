@@ -20,6 +20,7 @@ import pytest
 
 from agent_core.commands._builtin_impls import (
     Clear,
+    Context,
     Help,
     Learnings,
     Model,
@@ -32,6 +33,7 @@ from agent_core.commands._builtin_impls import (
     Think,
     Wisdom,
 )
+from agent_core.inference import Usage
 from agent_core.conversation import Conversation
 
 
@@ -448,3 +450,137 @@ async def test_quit_yields_response():
     assert len(msgs) >= 1
     body = _body(msgs)
     assert "goodbye" in body.lower() or len(body) > 0
+
+
+# ---------------------------------------------------------------------------
+# /context
+# ---------------------------------------------------------------------------
+
+def _context_agent(tmp_path: Path, *, last_usage=None, schemas=None, prompt="System prompt body"):
+    """Build a minimal agent for /context tests."""
+    @dataclass
+    class _Cfg:
+        vault_path: Path
+        scratchpad_max_bytes: int = 2048
+
+    class _Agent:
+        name = "test"
+        config = _Cfg(tmp_path)
+
+        def __init__(self, prompt_text):
+            self._prompt = prompt_text
+            self.last_usage = {}
+
+        def system_prompt(self, ctx) -> str:
+            return self._prompt
+
+    agent = _Agent(prompt)
+    if last_usage is not None:
+        agent.last_usage = dict(last_usage)
+    if schemas is not None:
+        executor = MagicMock()
+        executor.schemas.return_value = schemas
+        agent.tool_executor = executor
+    return agent
+
+
+async def test_context_reports_no_usage_when_unrecorded(tmp_path):
+    agent = _context_agent(tmp_path, schemas=[])
+    msgs = await _collect(Context().run("", _ctx(agent, channel_id="ch-1")))
+    body = _body(msgs)
+    assert "no usage recorded" in body.lower()
+    assert "ch-1" in body
+
+
+async def test_context_reports_recorded_usage(tmp_path):
+    usage = Usage(prompt_tokens=1234, completion_tokens=56, total_tokens=1290, model="gemma-x")
+    agent = _context_agent(
+        tmp_path,
+        last_usage={"ch-1": usage},
+        schemas=[{"type": "function", "function": {"name": "x", "description": "y"}}],
+    )
+    msgs = await _collect(Context().run("", _ctx(agent, channel_id="ch-1")))
+    body = _body(msgs)
+    assert "1234" in body
+    assert "56" in body
+    assert "1290" in body
+    assert "gemma-x" in body
+
+
+async def test_context_reports_other_channel_separately(tmp_path):
+    usage = Usage(prompt_tokens=10, completion_tokens=2, total_tokens=12)
+    agent = _context_agent(tmp_path, last_usage={"ch-other": usage}, schemas=[])
+    msgs = await _collect(Context().run("", _ctx(agent, channel_id="ch-mine")))
+    body = _body(msgs)
+    # Channel mine has nothing recorded; should NOT show ch-other's totals.
+    assert "no usage recorded" in body.lower()
+    assert "ch-mine" in body
+
+
+async def test_context_includes_component_byte_breakdown(tmp_path):
+    schemas = [{"type": "function", "function": {"name": "x", "description": "y" * 200}}]
+    agent = _context_agent(tmp_path, schemas=schemas, prompt="A" * 500)
+    msgs = await _collect(Context().run("", _ctx(agent, channel_id="ch-1")))
+    body = _body(msgs)
+    assert "System prompt" in body
+    assert "Tool schemas" in body
+    assert "History" in body
+    assert "Scratchpad" in body
+    # System prompt is 500 'A' bytes; the byte count must appear.
+    assert "500" in body
+
+
+async def test_context_handles_missing_tool_executor(tmp_path):
+    """No tool_executor attached: tool schemas should be reported as 0 bytes / 0 tools."""
+    agent = _context_agent(tmp_path)  # no schemas arg => no tool_executor attr
+    msgs = await _collect(Context().run("", _ctx(agent, channel_id="ch-1")))
+    body = _body(msgs)
+    assert "0 tools" in body
+
+
+# ---------------------------------------------------------------------------
+# Agent.record_usage / Agent.last_usage
+# ---------------------------------------------------------------------------
+
+
+def test_record_usage_stores_per_channel():
+    """Multi-channel usage is keyed by channel_id."""
+    from agent_core.agent import Agent
+
+    class _A(Agent):
+        name = "test"
+
+    a = _A()
+    a.record_usage("ch-1", Usage(prompt_tokens=10, completion_tokens=2, total_tokens=12))
+    a.record_usage("ch-2", Usage(prompt_tokens=20, completion_tokens=4, total_tokens=24))
+    assert a.last_usage["ch-1"].total_tokens == 12
+    assert a.last_usage["ch-2"].total_tokens == 24
+
+
+def test_record_usage_none_is_noop():
+    """record_usage(None) doesn't crash and doesn't insert anything."""
+    from agent_core.agent import Agent
+
+    class _A(Agent):
+        name = "test"
+
+    a = _A()
+    a.record_usage("ch-1", None)
+    assert a.last_usage == {}
+
+
+def test_record_usage_lazy_init_when_super_init_skipped():
+    """Subclasses that override __init__ without calling super still work."""
+    from agent_core.agent import Agent
+
+    class _A(Agent):
+        name = "test"
+
+        def __init__(self):
+            # Deliberately do NOT call super().__init__()
+            pass
+
+    a = _A()
+    assert not hasattr(a, "last_usage")  # confirms super init was skipped
+    a.record_usage("ch-1", Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2))
+    assert a.last_usage["ch-1"].total_tokens == 2

@@ -19,6 +19,7 @@ from agent_core.conversation import Conversation
 if TYPE_CHECKING:
     from agent_core.tools.base import Tool
     from agent_core.commands.base import Command
+    from agent_core.inference import Usage
 
 
 @dataclass
@@ -72,6 +73,25 @@ class Agent:
     disabled_builtins: ClassVar[frozenset[str]] = frozenset()
 
     config: BaseConfig
+
+    def __init__(self) -> None:
+        # Per-channel last-turn token usage. Populated by record_usage().
+        # Read by the /context command (and any other consumer).
+        self.last_usage: dict[str, "Usage"] = {}
+
+    def record_usage(self, channel_id: str, usage: "Usage | None") -> None:
+        """Record token usage for a channel turn. Safe no-op if usage is None
+        (e.g. inference server didn't emit a usage block).
+
+        Lazy-initialises the dict if a subclass overrode __init__ without
+        calling super().__init__(); reading code should use getattr with a
+        default to mirror that.
+        """
+        if usage is None:
+            return
+        if not hasattr(self, "last_usage"):
+            self.last_usage = {}
+        self.last_usage[channel_id] = usage
 
     def setup(self) -> None:
         """Override to construct domain-specific resources. Framework managers

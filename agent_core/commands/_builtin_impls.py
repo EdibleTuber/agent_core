@@ -1,4 +1,4 @@
-"""Implementations of the 12 builtin commands.
+"""Implementations of the builtin commands.
 
 Each command is a thin wrapper over a framework manager. Commands read state
 from `ctx.agent.X` (framework managers) and `ctx.conversation` /
@@ -330,3 +330,83 @@ class Quit(Command):
 
     async def run(self, raw_args: str, ctx) -> AsyncIterator:
         yield ResponseMessage(text="Goodbye.")
+
+
+class Context(Command):
+    name = "context"
+    args = ""
+    description = (
+        "Show the channel's context budget: last-turn token usage and current "
+        "byte sizes of the system prompt, tool schemas, conversation history, "
+        "and scratchpad."
+    )
+    requires = ("config",)
+
+    async def run(self, raw_args: str, ctx) -> AsyncIterator:
+        import json
+
+        agent = ctx.agent
+
+        # Component sizes from current state (what the next request would send).
+        # Bytes are cheap; tokens would need a tokenizer dep we don't carry.
+        try:
+            sys_prompt = agent.system_prompt(ctx)
+        except Exception as exc:
+            sys_prompt = ""
+            sys_err = f" (error building: {exc})"
+        else:
+            sys_err = ""
+        sys_bytes = len(sys_prompt.encode("utf-8"))
+
+        executor = getattr(agent, "tool_executor", None)
+        if executor is not None:
+            schemas = executor.schemas()
+            schema_bytes = len(json.dumps(schemas).encode("utf-8"))
+            schema_count = len(schemas)
+        else:
+            schema_bytes = 0
+            schema_count = 0
+
+        history = getattr(ctx.conversation, "messages", []) or []
+        history_bytes = len(json.dumps(history).encode("utf-8"))
+        history_turns = len(history)
+
+        # Scratchpad: read live since the agent may not always have a cached one.
+        scratchpad_bytes = 0
+        try:
+            from agent_core.scratchpad import Scratchpad
+            sp = Scratchpad(
+                vault_path=agent.config.vault_path,
+                agent_name=agent.name,
+                channel_id=ctx.channel_id,
+                max_bytes=getattr(agent.config, "scratchpad_max_bytes", 0),
+            )
+            scratchpad_bytes = len(sp.read().encode("utf-8"))
+        except Exception:
+            pass
+
+        request_bytes = sys_bytes + schema_bytes + history_bytes + scratchpad_bytes
+
+        # Last-turn actual usage (ground truth, if recorded).
+        last_usage_dict = getattr(agent, "last_usage", {}) or {}
+        usage = last_usage_dict.get(ctx.channel_id)
+
+        lines = [f"Channel: {ctx.channel_id}"]
+        if usage is not None:
+            lines.append(
+                f"Last turn: {usage.prompt_tokens} prompt + "
+                f"{usage.completion_tokens} completion = {usage.total_tokens} tokens"
+                + (f" ({usage.model})" if usage.model else "")
+            )
+        else:
+            lines.append("Last turn: no usage recorded yet for this channel")
+
+        lines.append("")
+        lines.append("Current component sizes (bytes):")
+        lines.append(f"  System prompt:  {sys_bytes:>8}{sys_err}")
+        lines.append(f"  Tool schemas:   {schema_bytes:>8}  ({schema_count} tools)")
+        lines.append(f"  History:        {history_bytes:>8}  ({history_turns} turns)")
+        lines.append(f"  Scratchpad:     {scratchpad_bytes:>8}")
+        lines.append(f"  Approx total:   {request_bytes:>8}")
+
+        yield ResponseMessage(text="\n".join(lines))
