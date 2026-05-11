@@ -401,3 +401,58 @@ def test_create_promote_proposal_succeeds_with_all_fields():
     assert p.slug == "s"
     assert p.body == "b"
     assert p.target_title == "T"
+
+
+def test_create_promote_synthesis_proposal():
+    import pytest
+    ar = ApprovalRegistry()
+    proposal_id = ar.create_proposal(
+        kind="promote_synthesis",
+        rationale="User asked to promote vibe-coding chat",
+        note_path="raw/notes/vibe-coding.md",
+        target_title="Vibe-coding comprehension strategies",
+        slug="vibe-coding-comprehension-strategies",
+    )
+    p = ar.get(proposal_id)
+    assert p is not None
+    assert p.kind == "promote_synthesis"
+    assert p.note_path == "raw/notes/vibe-coding.md"
+    assert p.target_title == "Vibe-coding comprehension strategies"
+    assert p.slug == "vibe-coding-comprehension-strategies"
+    assert p.status == "pending"
+
+
+def test_create_promote_synthesis_requires_note_path():
+    import pytest
+    ar = ApprovalRegistry()
+    with pytest.raises(ValueError, match="note_path"):
+        ar.create_proposal(
+            kind="promote_synthesis",
+            rationale="x",
+            target_title="t",
+            slug="s",
+        )
+
+
+def test_create_promote_synthesis_requires_target_title():
+    import pytest
+    ar = ApprovalRegistry()
+    with pytest.raises(ValueError, match="target_title"):
+        ar.create_proposal(
+            kind="promote_synthesis",
+            rationale="x",
+            note_path="raw/notes/x.md",
+            slug="s",
+        )
+
+
+def test_create_promote_synthesis_requires_slug():
+    import pytest
+    ar = ApprovalRegistry()
+    with pytest.raises(ValueError, match="slug"):
+        ar.create_proposal(
+            kind="promote_synthesis",
+            rationale="x",
+            note_path="raw/notes/x.md",
+            target_title="t",
+        )

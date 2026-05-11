@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 ProposalStatus = Literal["pending", "approved", "declined", "consumed", "expired"]
-ProposalKind = Literal["research", "compile", "reorg", "consolidate", "promote", "batch_fallback"]
+ProposalKind = Literal["research", "compile", "reorg", "consolidate", "promote", "promote_synthesis", "batch_fallback"]
 
 DEFAULT_EXPIRY_MINUTES = 15
 
@@ -41,6 +41,7 @@ class Proposal:
     body: Optional[str] = None
     caller: Optional[str] = None
     context: Optional[str] = None
+    note_path: Optional[str] = None
     approval_choice: Optional[str] = None
     # asyncio.Event is set when the proposal reaches a terminal state
     # (approved, declined, or expired). Not part of the public dataclass
@@ -71,6 +72,7 @@ class ApprovalRegistry:
         body: Optional[str] = None,
         caller: Optional[str] = None,
         context: Optional[str] = None,
+        note_path: Optional[str] = None,
     ) -> str:
         if kind == "research" and not topic:
             raise ValueError("research proposals require a non-empty topic")
@@ -101,6 +103,13 @@ class ApprovalRegistry:
                 raise ValueError("promote proposals require target_title")
             if not body:
                 raise ValueError("promote proposals require body")
+        if kind == "promote_synthesis":
+            if not note_path:
+                raise ValueError("promote_synthesis proposals require note_path")
+            if not target_title:
+                raise ValueError("promote_synthesis proposals require target_title")
+            if not slug:
+                raise ValueError("promote_synthesis proposals require slug")
 
         proposal_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
@@ -121,6 +130,7 @@ class ApprovalRegistry:
             body=body,
             caller=caller,
             context=context,
+            note_path=note_path,
         )
         return proposal_id
 
