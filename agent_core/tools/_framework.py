@@ -25,8 +25,14 @@ from agent_core.tools.base import Tool
 def _truncate(s: str | None, n: int) -> str:
     """Normalize and truncate a string to n chars, with '…' suffix when cut.
 
-    Newlines collapse to spaces; outer whitespace strips. Word-boundary cut:
-    if the limit lands inside a word, back up to the last space before n-1.
+    Newlines collapse to spaces; outer whitespace strips. If `s` exceeds
+    `n` chars, cut at `n - 1` and append `…`. Any trailing whitespace at
+    the cut point is trimmed before the ellipsis, so cuts that land right
+    after a word produce a clean "word…" rather than "word …".
+
+    Does NOT back up to the prior word boundary when the cut lands inside
+    a word. Callers needing strict word-boundary truncation should use a
+    different helper.
     """
     s = (s or "").replace("\n", " ").strip()
     if len(s) <= n:
