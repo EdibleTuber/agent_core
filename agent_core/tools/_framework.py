@@ -22,6 +22,20 @@ from agent_core.scratchpad import Scratchpad, ScratchpadTooLarge
 from agent_core.tools.base import Tool
 
 
+def _truncate(s: str | None, n: int) -> str:
+    """Normalize and truncate a string to n chars, with '…' suffix when cut.
+
+    Newlines collapse to spaces; outer whitespace strips. Word-boundary cut:
+    if the limit lands inside a word, back up to the last space before n-1.
+    """
+    s = (s or "").replace("\n", " ").strip()
+    if len(s) <= n:
+        return s
+    # Reserve one char for the ellipsis; rstrip removes trailing space if the
+    # cut landed right after a word.
+    return s[: n - 1].rstrip() + "…"
+
+
 class FetchUrl(Tool):
     """Fetch a URL through the agent's allowlist and return extracted text."""
 

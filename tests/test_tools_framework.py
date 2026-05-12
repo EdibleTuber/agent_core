@@ -19,7 +19,45 @@ from agent_core.tools._framework import (
     SearchVault,
     SearchWeb,
     UpdateScratch,
+    _truncate,
 )
+
+
+# ---------------------------------------------------------------------------
+# _truncate helper
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_short_string_unchanged():
+    assert _truncate("hello", 200) == "hello"
+
+
+def test_truncate_long_string_appends_ellipsis():
+    s = "x" * 250
+    result = _truncate(s, 200)
+    assert len(result) == 200
+    assert result.endswith("…")
+
+
+def test_truncate_word_boundary():
+    # 12-char limit on "hello world how are you" should clip at "hello world…"
+    # (cuts at last space before the limit, not mid-word)
+    result = _truncate("hello world how are you", 12)
+    assert result == "hello world…"
+
+
+def test_truncate_normalizes_newlines_to_spaces():
+    result = _truncate("line1\nline2", 200)
+    assert result == "line1 line2"
+
+
+def test_truncate_strips_outer_whitespace():
+    result = _truncate("  spaced  ", 200)
+    assert result == "spaced"
+
+
+def test_truncate_handles_none_input():
+    assert _truncate(None, 200) == ""
 
 
 def _ctx(agent, channel_id="default"):
