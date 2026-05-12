@@ -18,6 +18,8 @@ Deviations from the original plan (method names verified against real modules):
 """
 from __future__ import annotations
 
+import json
+
 from agent_core.scratchpad import Scratchpad, ScratchpadTooLarge
 from agent_core.tools.base import Tool
 
@@ -84,8 +86,9 @@ class SearchVault(Tool):
 
     name = "search_vault"
     description = (
-        "Semantic search over the vault. "
-        "Returns matching documents with name and summary snippet."
+        "Semantic search over the vault. Returns JSON: "
+        "{status, query, count, results: [{path, name, summary, score}]}. "
+        "Use the `path` field directly for cat/edit/grep."
     )
     parameters = {
         "type": "object",
@@ -103,28 +106,43 @@ class SearchVault(Tool):
     async def run(self, args, ctx):
         query = (args.get("query") or "").strip()
         if not query:
-            return "Error: 'query' parameter is required."
+            return json.dumps({
+                "status": "error",
+                "reason": "'query' parameter is required.",
+            })
         max_results = max(1, min(int(args.get("max_results", 5)), 20))
         try:
-            # RetrievalClient.search(query, limit=N) -> list[dict]
-            # Result dict keys: id, name, collection, summary, tags, score
             results = await ctx.agent.retrieval.search(query, limit=max_results)
         except Exception as exc:
-            return f"Search error: {exc}"
-        if not results:
-            return f"No vault matches for: {query}"
-        lines = [f"Found {len(results)} match(es) for '{query}':"]
+            return json.dumps({
+                "status": "error",
+                "query": query,
+                "reason": f"Search error: {type(exc).__name__}: {exc}",
+            })
+        structured = []
         for r in results:
             if isinstance(r, dict):
-                name = r.get("name") or r.get("id", "?")
-                snippet = r.get("summary", "")
+                id_val = r.get("id", "")
+                name = r.get("name") or id_val
+                summary = r.get("summary", "")
+                score = r.get("score", 0.0)
             else:
-                name = getattr(r, "name", None) or getattr(r, "id", "?")
-                snippet = getattr(r, "summary", "")
-            lines.append(f"  {name}")
-            if snippet:
-                lines.append(f"    {str(snippet)[:200]}")
-        return "\n".join(lines)
+                id_val = getattr(r, "id", "")
+                name = getattr(r, "name", None) or id_val
+                summary = getattr(r, "summary", "")
+                score = getattr(r, "score", 0.0)
+            structured.append({
+                "path": f"{id_val}.md" if id_val else "",
+                "name": name,
+                "summary": _truncate(summary, 200),
+                "score": round(float(score), 3),
+            })
+        return json.dumps({
+            "status": "ok",
+            "query": query,
+            "count": len(structured),
+            "results": structured,
+        })
 
 
 class SearchWeb(Tool):

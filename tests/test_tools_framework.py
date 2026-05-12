@@ -9,6 +9,7 @@ Method-name deviations from the original plan:
                       (ChannelStore has no .scratchpad() method)
   - WebSearchClient:  .search(query) returning list[SearchResult] — matches plan
 """
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -106,22 +107,27 @@ async def test_search_web_empty_results():
 
 async def test_search_vault_calls_retrieval():
     retrieval = MagicMock()
-    # Real method: .search(query, limit=N) returning list[dict] with keys
-    # id, name, collection, summary, tags, score
     retrieval.search = AsyncMock(return_value=[
-        {"name": "Notes/a.md", "summary": "matched content"},
+        {"id": "Notes/a", "name": "Notes/a.md", "summary": "matched content", "score": 0.5},
     ])
     agent = MagicMock(retrieval=retrieval)
     result = await SearchVault().run({"query": "test"}, _ctx(agent))
     retrieval.search.assert_called_once_with("test", limit=5)
-    assert "Notes/a.md" in result
-    assert "matched" in result
+    payload = json.loads(result)
+    assert payload["status"] == "ok"
+    assert payload["query"] == "test"
+    assert payload["count"] == 1
+    assert payload["results"][0]["path"] == "Notes/a.md"
+    assert payload["results"][0]["summary"] == "matched content"
 
 
 async def test_search_vault_requires_query():
     agent = MagicMock()
     result = await SearchVault().run({}, _ctx(agent))
-    assert "query" in result.lower() and "required" in result.lower()
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    assert "query" in payload["reason"].lower()
+    assert "required" in payload["reason"].lower()
 
 
 async def test_search_vault_empty_results():
@@ -129,7 +135,78 @@ async def test_search_vault_empty_results():
     retrieval.search = AsyncMock(return_value=[])
     agent = MagicMock(retrieval=retrieval)
     result = await SearchVault().run({"query": "nothing"}, _ctx(agent))
-    assert "no" in result.lower()
+    payload = json.loads(result)
+    assert payload["status"] == "ok"
+    assert payload["query"] == "nothing"
+    assert payload["count"] == 0
+    assert payload["results"] == []
+
+
+async def test_search_vault_path_has_md_extension():
+    retrieval = MagicMock()
+    retrieval.search = AsyncMock(return_value=[
+        {"id": "Software-Development/foo", "name": "Foo", "summary": "...", "score": 0.7},
+    ])
+    agent = MagicMock(retrieval=retrieval)
+    result = await SearchVault().run({"query": "x"}, _ctx(agent))
+    payload = json.loads(result)
+    assert payload["results"][0]["path"] == "Software-Development/foo.md"
+
+
+async def test_search_vault_retrieval_exception_returns_json_error():
+    retrieval = MagicMock()
+    retrieval.search = AsyncMock(side_effect=RuntimeError("retrieval down"))
+    agent = MagicMock(retrieval=retrieval)
+    result = await SearchVault().run({"query": "x"}, _ctx(agent))
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    assert payload["query"] == "x"
+    assert "RuntimeError" in payload["reason"]
+    assert "retrieval down" in payload["reason"]
+
+
+async def test_search_vault_score_rounded_to_3dp():
+    retrieval = MagicMock()
+    retrieval.search = AsyncMock(return_value=[
+        {"id": "a", "name": "a", "summary": "s", "score": 0.8732145},
+    ])
+    agent = MagicMock(retrieval=retrieval)
+    result = await SearchVault().run({"query": "x"}, _ctx(agent))
+    payload = json.loads(result)
+    assert payload["results"][0]["score"] == 0.873
+
+
+async def test_search_vault_summary_truncates_with_ellipsis():
+    long_summary = "x" * 250
+    retrieval = MagicMock()
+    retrieval.search = AsyncMock(return_value=[
+        {"id": "a", "name": "a", "summary": long_summary, "score": 0.5},
+    ])
+    agent = MagicMock(retrieval=retrieval)
+    result = await SearchVault().run({"query": "x"}, _ctx(agent))
+    payload = json.loads(result)
+    summary = payload["results"][0]["summary"]
+    assert len(summary) == 200
+    assert summary.endswith("…")
+
+
+async def test_search_vault_short_summary_unchanged():
+    retrieval = MagicMock()
+    retrieval.search = AsyncMock(return_value=[
+        {"id": "a", "name": "a", "summary": "short text", "score": 0.5},
+    ])
+    agent = MagicMock(retrieval=retrieval)
+    result = await SearchVault().run({"query": "x"}, _ctx(agent))
+    payload = json.loads(result)
+    assert payload["results"][0]["summary"] == "short text"
+
+
+async def test_search_vault_max_results_clamped_and_passed():
+    retrieval = MagicMock()
+    retrieval.search = AsyncMock(return_value=[])
+    agent = MagicMock(retrieval=retrieval)
+    await SearchVault().run({"query": "x", "max_results": 50}, _ctx(agent))
+    retrieval.search.assert_called_once_with("x", limit=20)
 
 
 # ---------------------------------------------------------------------------
