@@ -6,6 +6,7 @@ footer.
 """
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 
 OUTPUT_CAP_BYTES = 32 * 1024
@@ -44,9 +45,6 @@ def cap_output(text: str) -> str:
     truncated = truncated_bytes.decode("utf-8", errors="ignore")
     dropped = len(encoded) - len(truncated.encode("utf-8"))
     return truncated + f"\n\n[output truncated: {dropped} bytes dropped]"
-
-
-import difflib
 
 
 def suggest_nearest_paths(

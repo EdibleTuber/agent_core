@@ -105,6 +105,14 @@ def test_suggest_nearest_paths_empty_vault(tmp_path):
     assert suggest_nearest_paths(tmp_path, "anything.md") == []
 
 
+def test_suggest_nearest_paths_empty_query_returns_empty(tmp_path):
+    """Empty missing_path string returns []. The Grep call site passes
+    `path or ""` so this contract is load-bearing for the empty-path case."""
+    (tmp_path / "foo.md").write_text("x")
+    (tmp_path / "bar.md").write_text("x")
+    assert suggest_nearest_paths(tmp_path, "") == []
+
+
 def test_format_not_found_with_suggestions_appends_when_matches(tmp_path):
     """Formatter produces base + newline + 'Did you mean: ...' when matches exist."""
     (tmp_path / "foo.md").write_text("x")
