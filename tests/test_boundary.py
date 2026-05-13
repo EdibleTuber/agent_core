@@ -1,13 +1,7 @@
 """Tests for the GUID boundary primitive extracted from PAL."""
 import re
 
-import pytest
-
-from agent_core.boundary import (
-    generate_guid,
-    wrap_untrusted,
-    SANITIZATION_SYSTEM_PROMPT,
-)
+from agent_core.boundary import generate_guid
 
 
 UUID4_RE = re.compile(

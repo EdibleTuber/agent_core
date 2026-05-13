@@ -20,7 +20,3 @@ def generate_guid() -> str:
     """Return a random UUID4 string for boundary tagging."""
     return str(uuid.uuid4())
 
-
-# Exported symbols for Task 2 (will be fully implemented then)
-wrap_untrusted = None
-SANITIZATION_SYSTEM_PROMPT = None
