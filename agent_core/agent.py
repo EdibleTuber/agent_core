@@ -74,6 +74,20 @@ class Agent:
 
     config: BaseConfig
 
+    def register_tools(self) -> list[type["Tool"]]:
+        """Return tools to register dynamically at startup.
+
+        Override this in subclasses that need to construct their tool list
+        at runtime — for example, after MCP worker discovery, when the set
+        of available tools depends on which external workers responded to
+        list_tools.
+
+        The returned list is unioned with cls.tools by the framework
+        during _attach_registries. Returning [] (the default) is equivalent
+        to relying purely on declarative cls.tools.
+        """
+        return []
+
     def __init__(self) -> None:
         # Per-channel last-turn token usage. Populated by record_usage().
         # Read by the /context command (and any other consumer).
