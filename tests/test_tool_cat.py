@@ -63,3 +63,20 @@ async def test_cat_requires_path(tmp_path):
     agent = _Agent(tmp_path)
     result = await Cat().run({}, _ctx(agent))
     assert "path" in result.lower() and "required" in result.lower()
+
+
+async def test_cat_404_includes_suggestions_when_similar_path_exists(tmp_path):
+    """Cat's 404 error gets a 'Did you mean: ...' line when a near-match exists."""
+    (tmp_path / "foo.md").write_text("body")
+    agent = _Agent(tmp_path)
+    result = await Cat().run({"path": "fooo.md"}, _ctx(agent))
+    assert "File not found: fooo.md" in result
+    assert "Did you mean: " in result
+    assert "foo.md" in result
+
+
+async def test_cat_404_bare_when_no_similar_path(tmp_path):
+    """Empty vault: Cat's 404 has no Did-you-mean tail."""
+    agent = _Agent(tmp_path)
+    result = await Cat().run({"path": "anything.md"}, _ctx(agent))
+    assert result == "File not found: anything.md"

@@ -95,3 +95,14 @@ async def test_read_lines_invalid_range(tmp_path):
     agent = _Agent(tmp_path)
     result = await ReadLines().run({"path": "x.md", "start": 5, "end": 2}, _ctx(agent))
     assert "invalid" in result.lower() or "range" in result.lower()
+
+
+async def test_read_lines_404_includes_suggestions(tmp_path):
+    """ReadLines 404 (via _read_safe) gets the suggestion treatment."""
+    (tmp_path / "foo.md").write_text("line1\nline2")
+    agent = _Agent(tmp_path)
+    result = await ReadLines().run(
+        {"path": "fooo.md", "start": 1, "end": 1}, _ctx(agent)
+    )
+    assert "File not found: fooo.md" in result
+    assert "foo.md" in result

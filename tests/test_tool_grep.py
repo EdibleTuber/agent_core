@@ -83,3 +83,15 @@ async def test_grep_max_hits(tmp_path):
     result = await Grep().run({"pattern": "match", "max_hits": 10}, _ctx(agent))
     hit_lines = [l for l in result.splitlines() if l.startswith("x.md:")]
     assert len(hit_lines) == 10
+
+
+async def test_grep_404_on_missing_file_includes_suggestions(tmp_path):
+    """Grep 404 when path arg is a missing file gets the suggestion treatment."""
+    (tmp_path / "foo.md").write_text("hello world")
+    agent = _Agent(tmp_path)
+    result = await Grep().run(
+        {"pattern": "hello", "path": "fooo.md"}, _ctx(agent)
+    )
+    assert "Path not found: fooo.md" in result
+    assert "Did you mean: " in result
+    assert "foo.md" in result

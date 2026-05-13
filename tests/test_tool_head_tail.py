@@ -65,3 +65,22 @@ async def test_tail_missing_file(tmp_path):
     agent = _Agent(tmp_path)
     result = await Tail().run({"path": "nope.md"}, _ctx(agent))
     assert "not found" in result.lower()
+
+
+async def test_head_404_includes_suggestions(tmp_path):
+    """Head 404 (via _read_safe) gets the suggestion treatment too."""
+    (tmp_path / "vibe-coding.md").write_text("body")
+    agent = _Agent(tmp_path)
+    result = await Head().run({"path": "vibe_coding.md"}, _ctx(agent))
+    assert "File not found: vibe_coding.md" in result
+    assert "Did you mean: " in result
+    assert "vibe-coding.md" in result
+
+
+async def test_tail_404_includes_suggestions(tmp_path):
+    """Tail 404 (via _read_safe) gets the suggestion treatment."""
+    (tmp_path / "notes.md").write_text("body")
+    agent = _Agent(tmp_path)
+    result = await Tail().run({"path": "nottes.md"}, _ctx(agent))
+    assert "File not found: nottes.md" in result
+    assert "notes.md" in result

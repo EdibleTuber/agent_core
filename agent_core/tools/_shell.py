@@ -4,7 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_core.tools.base import Tool
-from agent_core.tools._shell_helpers import cap_output, is_system_path, resolve_safe
+from agent_core.tools._shell_helpers import (
+    cap_output,
+    format_not_found_with_suggestions,
+    is_system_path,
+    resolve_safe,
+)
 
 
 class Cat(Tool):
@@ -29,7 +34,9 @@ class Cat(Tool):
         if resolved is None:
             return f"Error: path escapes outside vault: {path}"
         if not resolved.exists():
-            return f"File not found: {path}"
+            return format_not_found_with_suggestions(
+                ctx.agent.config.vault_path, path, f"File not found: {path}"
+            )
         if not resolved.is_file():
             return f"Not a file: {path}"
         try:
@@ -50,7 +57,9 @@ def _read_safe(args, vault_path):
     if resolved is None:
         return None, f"Error: path escapes outside vault: {path}"
     if not resolved.exists():
-        return None, f"File not found: {path}"
+        return None, format_not_found_with_suggestions(
+            vault_path, path, f"File not found: {path}"
+        )
     if not resolved.is_file():
         return None, f"Not a file: {path}"
     return resolved, None
@@ -209,7 +218,9 @@ class Grep(Tool):
         else:
             resolved = vault.resolve()
         if not resolved.exists():
-            return f"Path not found: {path or '/'}"
+            return format_not_found_with_suggestions(
+                vault, path or "", f"Path not found: {path or '/'}"
+            )
 
         flags = re.IGNORECASE if ignore_case else 0
         try:
