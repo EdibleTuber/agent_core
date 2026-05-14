@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0] - 2026-05-13
+
+### Added
+- `agent_core.boundary` module with `generate_guid()`, `wrap_untrusted()`, and `SANITIZATION_SYSTEM_PROMPT` extracted from PAL.
+- `agent_core.workers` subpackage: `types` (RiskTier, WorkerSpec, WorkerError, AuditEntry, WORKER_CONTRACT_VERSION), `registry` (WorkerRegistry, WorkerNotFoundError), `risk` (RiskGate, TierDecision), `audit` (AuditLog), `conformance` (assert_conformance, MockWorkerContract).
+- `Agent.register_tools()` lifecycle hook for dynamic tool registration at runtime; unioned with declarative `cls.tools` by `runtime._attach_registries`.
+- Env-gated `test_reasoning_smoke.py` for verifying `reasoning_content` handling against a real local-manager model.
+
+### Dependencies
+- Added `pydantic>=2.0` as an explicit dependency (previously transitive).
+
+### Notes
+- PAL consumers should update their pin to `v1.2.0` and switch `pal.boundary` imports to `agent_core.boundary`. The PAL update PR is a no-op functionally — boundary helpers and reasoning API are unchanged.
+- No breaking changes. Existing declarative `tools = [...]` works exactly as before.
+
 ## [1.0.0] - 2026-05-09
 
 ### Milestone
