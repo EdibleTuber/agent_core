@@ -40,9 +40,15 @@ def _attach_registries(agent) -> None:
     from agent_core.tools.executor import ToolExecutor
 
     cls = type(agent)
+    # Union declarative cls.tools with dynamic register_tools().
+    # cls.tools is the historical PAL pattern; register_tools() is new in
+    # v1.2.0 for agents that need runtime construction (post-MCP-discovery).
+    declared = list(cls.tools)
+    dynamic = list(agent.register_tools())
+    all_tools = declared + [t for t in dynamic if t not in declared]
     agent.tool_executor = ToolExecutor.build(
         agent,
-        list(cls.tools),
+        all_tools,
         disabled=cls.disabled_builtins,
     )
     # Pre-assign a sentinel so that commands requiring "command_registry"

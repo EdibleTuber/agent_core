@@ -60,3 +60,31 @@ def test_register_tools_coexists_with_class_tools():
     agent = _Hybrid()
     assert _Hybrid.tools == [_Tool1]
     assert agent.register_tools() == [_Tool2]
+
+
+def test_runtime_unions_class_tools_with_register_tools():
+    """_attach_registries should union class-level cls.tools with
+    register_tools() output."""
+    from unittest.mock import MagicMock
+
+    from agent_core.runtime import _attach_registries
+
+    class _Mixed(Agent):
+        name = "mixed"
+        tools = [_Tool1]
+
+        def register_tools(self):
+            return [_Tool2]
+
+    agent = _Mixed()
+    # Stub framework managers that _attach_registries reads during
+    # ToolExecutor.build and SystemPromptBuilder construction.
+    for attr in ["profile", "wisdom", "channels", "learning", "allowlist",
+                 "approval_registry", "inference", "retrieval", "websearch",
+                 "config", "fetcher"]:
+        setattr(agent, attr, MagicMock())
+
+    _attach_registries(agent)
+    registered_names = {t.name for t in agent.tool_executor._tools.values()}
+    assert "tool1" in registered_names
+    assert "tool2" in registered_names
