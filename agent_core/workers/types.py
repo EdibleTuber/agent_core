@@ -7,6 +7,7 @@ over MCP-Streamable-HTTP, an HTTP /jobs API, or an in-process stub.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any, Literal
 
@@ -75,3 +76,43 @@ class WorkerSpec(BaseModel):
                 f"worker name {v!r} must be alphanumeric/underscore (MCP-safe)"
             )
         return v
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+Outcome = Literal[
+    "ok",
+    "error",
+    "hitl_approved",
+    "hitl_denied",
+    "validation_failed",
+    "timeout",
+    "cancelled",
+]
+
+
+class AuditEntry(BaseModel):
+    """One row in PARE's per-project audit log."""
+    ts: datetime = Field(default_factory=_utc_now)
+    request_id: str
+    """The MCP request ID (also propagated to worker logs via _meta for
+    cross-stream correlation)."""
+    worker: str
+    tool: str
+    args: dict[str, Any]
+    """PARE-controlled redaction is applied before storing here."""
+    declared_tier: RiskTier
+    effective_tier: RiskTier
+    override_reason: str | None = None
+    outcome: Outcome
+    latency_ms: int
+    session_guid: str
+    """The daemon-session boundary GUID, stamped per entry so audit
+    trails group cleanly by session (§4.10.1)."""
+    worker_contract_version: int
+
+    # Reserved for v1.x recipes; nullable in v1.
+    recipe_id: str | None = None
+    parent_call_id: str | None = None
