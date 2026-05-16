@@ -48,3 +48,8 @@ class MCPClient:
         if self._transport_ctx is not None:
             await self._transport_ctx.__aexit__(None, None, None)
             self._transport_ctx = None
+
+    async def initialize(self):
+        """Send the MCP initialize request. Returns the server's InitializeResult."""
+        assert self._session is not None, "call connect() before initialize()"
+        return await self._session.initialize()
