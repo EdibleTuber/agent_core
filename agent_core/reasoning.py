@@ -12,11 +12,11 @@ from typing import Literal, Protocol
 class _ConversationLike(Protocol):
     """Duck-typed contract for what `decide_mode` reads from its argument.
 
-    Any object with an optional `reasoning_override` attribute set to
-    "on", "off", or None will satisfy this. Concrete agents (e.g. PAL's
+    Any object with an `overrides` dict containing a "reasoning" key set to
+    "on" or "off" will satisfy this. Concrete agents (e.g. agent_core's
     Conversation class) match without explicit subclassing.
     """
-    reasoning_override: Literal["on", "off"] | None
+    overrides: dict
 
 
 _MODEL_FAMILIES: dict[str, str] = {
@@ -53,7 +53,9 @@ def extract_reasoning(response: dict) -> str | None:
 
 
 def decide_mode(conversation: _ConversationLike) -> Literal["on", "off"]:
-    override = getattr(conversation, "reasoning_override", None)
-    if override in ("on", "off"):
-        return override
+    overrides = getattr(conversation, "overrides", None)
+    if isinstance(overrides, dict):
+        override = overrides.get("reasoning")
+        if override in ("on", "off"):
+            return override
     return "off"

@@ -1,7 +1,6 @@
 # tests/test_reasoning.py
 """Tests for the reasoning module."""
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
 
 from agent_core.reasoning import shape_request, extract_reasoning, decide_mode, _identify_family
 
@@ -11,8 +10,10 @@ class _StubConversation:
     """Minimal stand-in for an agent's Conversation type.
 
     Matches the duck-typed _ConversationLike Protocol that decide_mode reads.
+    The override is stored under overrides["reasoning"] so the stub matches
+    where /think writes and where PAL's /status reads.
     """
-    reasoning_override: Literal["on", "off"] | None = None
+    overrides: dict = field(default_factory=dict)
 
 
 def test_identify_family_gemma4():
@@ -100,12 +101,12 @@ def test_extract_reasoning_empty_string():
 
 
 def test_decide_mode_override_on():
-    conv = _StubConversation(reasoning_override="on")
+    conv = _StubConversation(overrides={"reasoning": "on"})
     assert decide_mode(conv) == "on"
 
 
 def test_decide_mode_override_off():
-    conv = _StubConversation(reasoning_override="off")
+    conv = _StubConversation(overrides={"reasoning": "off"})
     assert decide_mode(conv) == "off"
 
 
@@ -118,3 +119,20 @@ def test_shape_request_does_not_mutate_input():
     body = {"model": "gemma-4-26b", "messages": []}
     shape_request(body, "gemma-4-26b-a4b-it-q4_k_m", "on")
     assert "chat_template_kwargs" not in body
+
+
+def test_decide_mode_ignores_unknown_override_values():
+    """auto, garbage, None, etc. fall through to the default of off."""
+    conv = _StubConversation(overrides={"reasoning": "auto"})
+    assert decide_mode(conv) == "off"
+    conv = _StubConversation(overrides={"reasoning": "garbage"})
+    assert decide_mode(conv) == "off"
+    conv = _StubConversation(overrides={"reasoning": None})
+    assert decide_mode(conv) == "off"
+
+
+def test_decide_mode_works_with_objects_without_overrides():
+    """Defensive: an object without an overrides attribute returns off, no raise."""
+    class _NoOverrides:
+        pass
+    assert decide_mode(_NoOverrides()) == "off"
