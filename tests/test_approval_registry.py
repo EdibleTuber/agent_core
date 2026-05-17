@@ -456,3 +456,39 @@ def test_create_promote_synthesis_requires_slug():
             note_path="raw/notes/x.md",
             target_title="t",
         )
+
+
+def test_edit_preserves_topics_when_set():
+    """edit() must copy `topics` to the successor proposal so multi-topic
+    edits don't silently drop the topic list."""
+    reg = ApprovalRegistry(expiry_minutes=15)
+    pid = reg.create_proposal(
+        topic="3 topics: a, b, c",
+        topics=["a", "b", "c"],
+        depth=3,
+        rationale="batch research",
+    )
+    new_id = reg.edit(pid, new_depth=5)
+    assert new_id is not None
+    successor = reg.get(new_id)
+    assert successor is not None
+    assert successor.topics == ["a", "b", "c"]
+    assert successor.depth == 5
+    assert successor.topic == "3 topics: a, b, c"
+
+
+def test_edit_topics_none_unchanged():
+    """edit() on a single-topic proposal (topics=None) keeps topics=None
+    on the successor; regression pin."""
+    reg = ApprovalRegistry(expiry_minutes=15)
+    pid = reg.create_proposal(
+        topic="docker networking",
+        depth=3,
+        rationale="single-topic research",
+    )
+    new_id = reg.edit(pid, new_depth=5)
+    assert new_id is not None
+    successor = reg.get(new_id)
+    assert successor is not None
+    assert successor.topics is None
+    assert successor.topic == "docker networking"

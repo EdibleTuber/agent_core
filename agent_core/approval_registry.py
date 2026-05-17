@@ -43,6 +43,7 @@ class Proposal:
     context: Optional[str] = None
     note_path: Optional[str] = None
     approval_choice: Optional[str] = None
+    topics: Optional[list[str]] = None
     # asyncio.Event is set when the proposal reaches a terminal state
     # (approved, declined, or expired). Not part of the public dataclass
     # fields — carried separately for awaiting.
@@ -73,6 +74,7 @@ class ApprovalRegistry:
         caller: Optional[str] = None,
         context: Optional[str] = None,
         note_path: Optional[str] = None,
+        topics: Optional[list[str]] = None,
     ) -> str:
         if kind == "research" and not topic:
             raise ValueError("research proposals require a non-empty topic")
@@ -131,6 +133,7 @@ class ApprovalRegistry:
             caller=caller,
             context=context,
             note_path=note_path,
+            topics=list(topics) if topics else None,
         )
         return proposal_id
 
@@ -219,6 +222,7 @@ class ApprovalRegistry:
             ),
             target_path=old.target_path,
             target_title=old.target_title,
+            topics=list(old.topics) if old.topics else None,
         )
         new_proposal.event.set()
         self._proposals[new_id] = new_proposal
