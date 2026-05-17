@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.0] - 2026-05-16
+
+### Added
+- `agent_core.workers.MCPClient` — thin async wrapper over the official `mcp` Python SDK (v1.27.x) Streamable HTTP transport. Methods: `connect`, `initialize`, `list_tools`, `call_tool`, `close`.
+- `agent_core.workers.MCPClientPool` — per-worker client cache, lazy-connect, reused across all dynamic Tool calls.
+- `agent_core.workers.discover_and_register(specs, pool)` — discovers tools across all workers in a registry and produces ready-to-register `Tool` subclasses (name-prefixed `{worker}_{tool}`). The natural return shape for an agent's `register_tools()`.
+- `agent_core.workers.make_tool_class(worker_spec, tool_def, pool)` — dynamic Tool subclass factory.
+- `agent_core.workers.conformance.assert_streamable_http_conformance(endpoint)` — live-transport conformance check. Workers import this into their own test suites.
+
+### Dependencies
+- Added `mcp>=1.27.0` (official Anthropic MCP Python SDK) to dependencies.
+- Added `fastmcp>=0.2.0` to dev dependencies (for the Streamable HTTP test fixture).
+
+### Notes
+- `worker_contract_version` stays at `1`. v1.3.0 is purely additive on top of the v1.2.x data layer; no fields removed, no schemas changed, no behaviour broken.
+- PAL consumers can bump the pin transparently; PAL doesn't use MCP workers in v1.
+
 ## [1.2.0] - 2026-05-13
 
 ### Added
