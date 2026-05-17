@@ -53,3 +53,8 @@ class MCPClient:
         """Send the MCP initialize request. Returns the server's InitializeResult."""
         assert self._session is not None, "call connect() before initialize()"
         return await self._session.initialize()
+
+    async def list_tools(self):
+        """Send the MCP tools/list request. Returns ListToolsResult."""
+        assert self._session is not None, "call connect() before list_tools()"
+        return await self._session.list_tools()
