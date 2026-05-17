@@ -35,3 +35,42 @@ async def test_list_tools_returns_stub_tools(streamable_http_fixture):
         assert "risky_high" in names
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_tool_round_trips_arguments(streamable_http_fixture):
+    """call_tool sends arguments and receives the stub's echo."""
+    client = MCPClient(streamable_http_fixture)
+    try:
+        await client.connect()
+        await client.initialize()
+        result = await client.call_tool("noop_low", {"message": "ping"})
+        # mcp.types.CallToolResult.content is a list of content blocks;
+        # the stub's dict return is serialized to a text content block by FastMCP.
+        text_blocks = [b for b in result.content if getattr(b, "type", None) == "text"]
+        assert text_blocks, f"no text content in result: {result!r}"
+        body = text_blocks[0].text
+        assert "ping" in body  # the echo
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_call_tool_unknown_name_raises(streamable_http_fixture):
+    """call_tool with a nonexistent tool name raises (MCP error)."""
+    client = MCPClient(streamable_http_fixture)
+    try:
+        await client.connect()
+        await client.initialize()
+        # The SDK may raise mcp.McpError, or a generic Exception, or return
+        # a result with isError=True. Cover all three: assert SOMETHING fails.
+        try:
+            result = await client.call_tool("nonexistent_tool", {})
+        except Exception:
+            pass  # Either raising or returning isError=True is acceptable.
+        else:
+            assert getattr(result, "isError", False), (
+                f"expected error for unknown tool but got: {result!r}"
+            )
+    finally:
+        await client.close()

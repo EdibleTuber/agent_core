@@ -58,3 +58,12 @@ class MCPClient:
         """Send the MCP tools/list request. Returns ListToolsResult."""
         assert self._session is not None, "call connect() before list_tools()"
         return await self._session.list_tools()
+
+    async def call_tool(self, name: str, arguments: dict | None = None):
+        """Send the MCP tools/call request. Returns CallToolResult.
+
+        Raises mcp.McpError (or the SDK's equivalent) on protocol errors;
+        the caller decides how to map those to agent_core error semantics.
+        """
+        assert self._session is not None, "call connect() before call_tool()"
+        return await self._session.call_tool(name, arguments or {})
