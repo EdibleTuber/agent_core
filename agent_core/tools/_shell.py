@@ -18,7 +18,13 @@ class Cat(Tool):
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Vault-relative file path."},
+            "path": {
+                "type": "string",
+                "description": (
+                    "Vault-relative path to existing file (e.g. 'Research/quantum.md'). "
+                    "Call search_vault first if the exact path is uncertain."
+                ),
+            },
         },
         "required": ["path"],
     }
@@ -122,7 +128,10 @@ class Ls(Tool):
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Vault-relative directory path; empty for root."},
+            "path": {
+                "type": "string",
+                "description": "Vault-relative directory path (e.g. 'Research'); empty for root.",
+            },
             "show_hidden": {"type": "boolean", "description": "Show _-prefixed entries (default false)."},
             "long": {"type": "boolean", "description": "Include size and mtime per entry (default false)."},
         },
