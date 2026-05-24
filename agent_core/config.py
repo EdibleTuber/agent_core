@@ -40,7 +40,7 @@ class BaseConfig:
     max_response_tokens: int = 4096
     batch_enabled: bool = False
     batch_inference_url: str = "http://192.168.1.14:11434"
-    batch_model: str = "gemma-4-E4B-it-Q4_K_M"
+    batch_model: str = "Qwen3.5-35B-A3B-Q4_K_M"
     scratchpad_max_bytes: int = 2048
 
 
