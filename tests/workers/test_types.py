@@ -109,3 +109,61 @@ def test_audit_entry_serializes_to_jsonlines_friendly_dict():
     assert d["override_reason"] == "name pattern *write* forces high"
     assert d["effective_tier"] == "high"
     assert isinstance(d["ts"], str)  # ISO format
+
+
+# Tests for stdio-transport WorkerSpec fields.
+
+
+def test_worker_spec_stdio_minimal_valid():
+    spec = WorkerSpec(
+        name="frida",
+        transport="stdio",
+        risk_default="medium",
+        command="frida-mcp",
+    )
+    assert spec.command == "frida-mcp"
+    assert spec.args == []
+    assert spec.env == {}
+    assert spec.cwd is None
+    # endpoint not required for stdio
+    assert spec.endpoint is None
+
+
+def test_worker_spec_stdio_with_args_env():
+    spec = WorkerSpec(
+        name="frida",
+        transport="stdio",
+        risk_default="medium",
+        command="python",
+        args=["-m", "frida_mcp"],
+        env={"FRIDA_DEBUG": "1"},
+    )
+    assert spec.args == ["-m", "frida_mcp"]
+    assert spec.env == {"FRIDA_DEBUG": "1"}
+
+
+def test_worker_spec_stdio_requires_command():
+    """transport=stdio without command must fail."""
+    with pytest.raises(ValidationError, match="command"):
+        WorkerSpec(
+            name="bad",
+            transport="stdio",
+            risk_default="low",
+        )
+
+
+def test_worker_spec_http_requires_endpoint():
+    """transport=streamable_http without endpoint must fail."""
+    with pytest.raises(ValidationError, match="endpoint"):
+        WorkerSpec(
+            name="bad",
+            transport="streamable_http",
+            risk_default="low",
+        )
+
+
+def test_worker_spec_endpoint_field_optional_at_field_level():
+    """endpoint becomes optional at the field level (None allowed) so stdio
+    specs can omit it. The transport↔fields invariant is in the validator."""
+    fields = WorkerSpec.model_fields
+    assert fields["endpoint"].is_required() is False

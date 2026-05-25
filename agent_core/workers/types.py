@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 WORKER_CONTRACT_VERSION = 1
@@ -59,7 +59,7 @@ class WorkerError(BaseModel):
 class WorkerSpec(BaseModel):
     """A single worker entry from workers.yaml."""
     name: str
-    endpoint: str
+    endpoint: str | None = None
     transport: Transport
     risk_default: RiskTier
     container: str | None = None
@@ -67,6 +67,10 @@ class WorkerSpec(BaseModel):
     kind: Literal["internal", "external_mcp"] = "internal"
     """external_mcp workers don't ship contract metadata; risk_default is
     raised one tier and name-pattern overrides apply aggressively."""
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -76,6 +80,20 @@ class WorkerSpec(BaseModel):
                 f"worker name {v!r} must be alphanumeric/underscore (MCP-safe)"
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_transport_fields(self) -> "WorkerSpec":
+        if self.transport in ("streamable_http", "http_job_api"):
+            if not self.endpoint:
+                raise ValueError(
+                    f"worker {self.name!r}: transport {self.transport!r} requires endpoint"
+                )
+        elif self.transport == "stdio":
+            if not self.command:
+                raise ValueError(
+                    f"worker {self.name!r}: transport 'stdio' requires command"
+                )
+        return self
 
 
 def _utc_now() -> datetime:
