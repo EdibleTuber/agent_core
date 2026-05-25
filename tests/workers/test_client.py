@@ -74,3 +74,42 @@ async def test_call_tool_unknown_name_raises(streamable_http_fixture):
             )
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_initialize_list_tools_call_tool(stdio_fixture_spec):
+    """Full MCPClient surface (initialize / list_tools / call_tool) works
+    against the stdio fixture."""
+    client = MCPClient(
+        command=stdio_fixture_spec.command,
+        args=stdio_fixture_spec.args,
+        env=stdio_fixture_spec.env or None,
+    )
+    try:
+        await client.connect()
+        await client.initialize()
+
+        tools = await client.list_tools()
+        names = {t.name for t in tools.tools}
+        assert "noop_low" in names
+        assert "risky_high" in names
+
+        result = await client.call_tool("noop_low", {"message": "ping-stdio"})
+        text_blocks = [b for b in result.content if getattr(b, "type", None) == "text"]
+        assert any("ping-stdio" in b.text for b in text_blocks)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_requires_endpoint_or_command():
+    """MCPClient with neither endpoint nor command raises."""
+    with pytest.raises(ValueError, match="endpoint.*command|command.*endpoint"):
+        MCPClient()
+
+
+@pytest.mark.asyncio
+async def test_client_rejects_both_endpoint_and_command():
+    """MCPClient with both endpoint and command raises (must choose one)."""
+    with pytest.raises(ValueError, match="both|choose"):
+        MCPClient(endpoint="http://x/mcp", command="frida-mcp")

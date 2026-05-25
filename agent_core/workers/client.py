@@ -1,12 +1,21 @@
-"""MCPClient: thin async wrapper over the official mcp SDK's
-Streamable HTTP transport.
+"""MCPClient: thin async wrapper over the official mcp SDK.
 
-Lifecycle:
+Supports two transports — Streamable HTTP (existing) and stdio (new).
+
+Lifecycle (Streamable HTTP):
     client = MCPClient(endpoint="http://host:port/mcp")
     await client.connect()
-    await client.initialize()          # MCP handshake (Task 3)
-    tools = await client.list_tools()  # tools/list (Task 4)
-    result = await client.call_tool(name, arguments)  # tools/call (Task 5)
+    await client.initialize()
+    tools = await client.list_tools()
+    result = await client.call_tool(name, arguments)
+    await client.close()
+
+Lifecycle (stdio):
+    client = MCPClient(command="python", args=["-m", "my_mcp_server"])
+    await client.connect()
+    await client.initialize()
+    tools = await client.list_tools()
+    result = await client.call_tool(name, arguments)
     await client.close()
 
 The wrapper exposes the methods Phase 2's discovery driver needs.
@@ -19,24 +28,61 @@ import logging
 from typing import Any
 
 from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 logger = logging.getLogger(__name__)
 
 
 class MCPClient:
-    """One MCP client connection to one worker endpoint."""
+    """One MCP client connection to one worker endpoint.
 
-    def __init__(self, endpoint: str) -> None:
+    Accepts either a Streamable HTTP endpoint or a stdio command, not both.
+    """
+
+    def __init__(
+        self,
+        endpoint: str | None = None,
+        *,
+        command: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> None:
+        if not endpoint and not command:
+            raise ValueError(
+                "MCPClient requires either endpoint (streamable_http) or "
+                "command (stdio)"
+            )
+        if endpoint and command:
+            raise ValueError(
+                "MCPClient cannot accept both endpoint and command — choose one transport"
+            )
         self.endpoint = endpoint
+        self.command = command
+        self.args = args or []
+        self.env = env or {}
+        self.cwd = cwd
+        self._transport: str = "stdio" if command else "streamable_http"
         self._session: ClientSession | None = None
-        self._transport_ctx: Any = None  # held to keep the streams open
+        self._transport_ctx: object | None = None
 
     async def connect(self) -> None:
-        """Open the Streamable HTTP transport and wrap it in a ClientSession.
+        """Open the configured transport and wrap it in a ClientSession.
 
-        The transport context manager is held on the instance; close() releases it."""
-        self._transport_ctx = streamablehttp_client(self.endpoint)
+        The transport context manager is held on the instance; close()
+        releases it."""
+        if self._transport == "stdio":
+            params = StdioServerParameters(
+                command=self.command,
+                args=self.args,
+                env=self.env or None,
+                cwd=self.cwd,
+            )
+            self._transport_ctx = stdio_client(params)
+        else:
+            self._transport_ctx = streamablehttp_client(self.endpoint)
+
         read_stream, write_stream, *_ = await self._transport_ctx.__aenter__()
         self._session = ClientSession(read_stream, write_stream)
         await self._session.__aenter__()
