@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.0] - 2026-05-25
+
+### Added
+- `agent_core.workers.MCPClient` now supports stdio transport alongside the existing Streamable HTTP. Constructor accepts either `endpoint` (HTTP, existing positional) or keyword-only `command` / `args` / `env` / `cwd` (stdio, new). `connect()` branches on whichever is configured.
+- `MCPClient.from_spec(spec)` classmethod — dispatches to the right transport from a `WorkerSpec`. Used internally by `MCPClientPool`.
+- `agent_core.workers.types.WorkerSpec` gains optional `command`, `args`, `env`, `cwd` fields. A `model_validator` enforces "endpoint required for streamable_http/http_job_api, command required for stdio."
+- `assert_stdio_conformance(spec)` — companion to `assert_streamable_http_conformance(endpoint)`. Workers run this against their own stdio configuration.
+
+### Notes
+- `worker_contract_version` stays at `1`. v1.4.0 is purely additive: the new transport opens up the community ecosystem of stdio MCP servers (Frida MCP, Ghidra MCP, mitmdump wrappers, etc.) without changing the contract surface.
+- Existing Streamable HTTP callers are unaffected. `MCPClient("http://...")` positional usage continues to work.
+- PAL consumers can bump the pin transparently; PAL doesn't use MCP workers in v1.
+
 ## [1.3.0] - 2026-05-16
 
 ### Added
