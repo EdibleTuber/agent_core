@@ -11,11 +11,14 @@ message.
 """
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from agent_core.workers.types import (
     WORKER_CONTRACT_VERSION,
 )
+
+if TYPE_CHECKING:
+    from agent_core.workers.types import WorkerSpec
 
 
 @runtime_checkable
@@ -135,6 +138,90 @@ async def assert_streamable_http_conformance(endpoint: str) -> None:
         except Exception as exc:
             exc_to_raise = AssertionError(
                 f"streamable_http_conformance: initialize failed: {exc}"
+            )
+
+        if exc_to_raise is not None:
+            return  # Will raise in finally after cleanup
+
+        list_result = await client.list_tools()
+        tools = getattr(list_result, "tools", None)
+        assert tools is not None, "list_tools returned no .tools attribute"
+        assert isinstance(tools, list), f"tools is not a list: {type(tools).__name__}"
+
+        for tool in tools:
+            assert tool.name, f"tool has empty name: {tool!r}"
+            schema = getattr(tool, "inputSchema", None)
+            assert schema is not None, (
+                f"tool {tool.name!r} has no inputSchema"
+            )
+            assert isinstance(schema, dict), (
+                f"tool {tool.name!r} inputSchema is not a dict"
+            )
+            assert "type" in schema, (
+                f"tool {tool.name!r} inputSchema missing top-level 'type'"
+            )
+    finally:
+        try:
+            await client.close()
+        except (Exception, asyncio.CancelledError):
+            # Suppress cleanup errors (e.g., connection never fully established).
+            pass
+        if exc_to_raise is not None:
+            raise exc_to_raise
+
+
+async def assert_stdio_conformance(spec: "WorkerSpec") -> None:
+    """Verify a live stdio MCP worker meets contract expectations.
+
+    Spawns the worker subprocess, runs the MCP handshake, lists tools,
+    and checks each tool's metadata is well-formed. Raises
+    AssertionError with a clear message on first failure.
+
+    Workers' own test suites import this and pass their WorkerSpec in.
+    """
+    import asyncio
+
+    from agent_core.workers.client import MCPClient
+
+    if spec.transport != "stdio":
+        raise AssertionError(
+            f"stdio_conformance: spec {spec.name!r} has transport "
+            f"{spec.transport!r}, not 'stdio'"
+        )
+
+    client = MCPClient.from_spec(spec)
+    exc_to_raise: AssertionError | None = None
+    try:
+        try:
+            await asyncio.wait_for(client.connect(), timeout=2.0)
+        except asyncio.TimeoutError as exc:
+            exc_to_raise = AssertionError(
+                f"stdio_conformance: connect timed out for {spec.name!r} "
+                f"(command={spec.command!r})"
+            )
+        except (asyncio.CancelledError, FileNotFoundError, OSError) as exc:
+            exc_to_raise = AssertionError(
+                f"stdio_conformance: connect failed for {spec.name!r} "
+                f"(command={spec.command!r}): {exc}"
+            )
+        except Exception as exc:
+            exc_to_raise = AssertionError(
+                f"stdio_conformance: connect failed for {spec.name!r} "
+                f"(command={spec.command!r}): {exc}"
+            )
+
+        if exc_to_raise is not None:
+            return  # Will raise in finally after cleanup
+
+        try:
+            await asyncio.wait_for(client.initialize(), timeout=2.0)
+        except asyncio.TimeoutError as exc:
+            exc_to_raise = AssertionError(
+                f"stdio_conformance: initialize timed out for {spec.name!r}"
+            )
+        except (asyncio.CancelledError, Exception) as exc:
+            exc_to_raise = AssertionError(
+                f"stdio_conformance: initialize failed for {spec.name!r}: {exc}"
             )
 
         if exc_to_raise is not None:
