@@ -59,3 +59,41 @@ async def test_pool_unknown_worker_raises(streamable_http_fixture):
             await pool.list_tools("nonexistent")
     finally:
         await pool.close_all()
+
+
+@pytest.mark.asyncio
+async def test_pool_works_with_stdio_spec(stdio_fixture_spec):
+    """MCPClientPool drives a stdio worker the same way as Streamable HTTP."""
+    pool = MCPClientPool([stdio_fixture_spec])
+    try:
+        tools = await pool.list_tools("stdio_stub")
+        names = {t.name for t in tools.tools}
+        assert "noop_low" in names
+
+        result = await pool.call_tool("stdio_stub", "risky_high", {"target": "via-stdio"})
+        text_blocks = [b for b in result.content if getattr(b, "type", None) == "text"]
+        assert any("via-stdio" in b.text for b in text_blocks)
+    finally:
+        await pool.close_all()
+
+
+@pytest.mark.asyncio
+async def test_pool_mixed_transports(streamable_http_fixture, stdio_fixture_spec):
+    """A pool with both an HTTP worker and a stdio worker handles each correctly."""
+    http_spec = WorkerSpec(
+        name="http_stub",
+        endpoint=streamable_http_fixture,
+        transport="streamable_http",
+        risk_default="low",
+    )
+    pool = MCPClientPool([http_spec, stdio_fixture_spec])
+    try:
+        http_tools = await pool.list_tools("http_stub")
+        stdio_tools = await pool.list_tools("stdio_stub")
+        # Both workers expose the same toy surface in their fixtures.
+        http_names = {t.name for t in http_tools.tools}
+        stdio_names = {t.name for t in stdio_tools.tools}
+        assert "noop_low" in http_names
+        assert "noop_low" in stdio_names
+    finally:
+        await pool.close_all()
