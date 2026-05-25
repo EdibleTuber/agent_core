@@ -45,3 +45,17 @@ async def test_discover_skips_unreachable_workers(caplog):
         assert any("bogus" in rec.message for rec in caplog.records)
     finally:
         await pool.close_all()
+
+
+@pytest.mark.asyncio
+async def test_discover_against_stdio_fixture(stdio_fixture_spec):
+    """discover_and_register returns prefixed Tool subclasses for a stdio
+    worker, same as for an HTTP worker."""
+    pool = MCPClientPool([stdio_fixture_spec])
+    try:
+        tool_classes = await discover_and_register([stdio_fixture_spec], pool)
+        names = {cls.name for cls in tool_classes}
+        assert "stdio_stub_noop_low" in names
+        assert "stdio_stub_risky_high" in names
+    finally:
+        await pool.close_all()
