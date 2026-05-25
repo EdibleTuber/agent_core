@@ -27,7 +27,7 @@ class MCPClientPool:
         async with self._connect_lock:
             if worker not in self._clients:
                 spec = self._specs[worker]
-                client = MCPClient(spec.endpoint)
+                client = MCPClient.from_spec(spec)
                 await client.connect()
                 await client.initialize()
                 self._clients[worker] = client
@@ -43,5 +43,8 @@ class MCPClientPool:
 
     async def close_all(self) -> None:
         for client in self._clients.values():
-            await client.close()
+            try:
+                await client.close()
+            except BaseException:
+                pass
         self._clients.clear()

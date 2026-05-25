@@ -25,7 +25,10 @@ error semantics happens at the call site (tool_factory.py, Task 7).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agent_core.workers.types import WorkerSpec
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -66,6 +69,23 @@ class MCPClient:
         self._transport: str = "stdio" if command else "streamable_http"
         self._session: ClientSession | None = None
         self._transport_ctx: object | None = None
+
+    @classmethod
+    def from_spec(cls, spec: "WorkerSpec") -> "MCPClient":
+        """Construct an MCPClient from a WorkerSpec, dispatching transport.
+
+        WorkerSpec.transport determines which constructor path to use:
+            stdio           → cls(command=..., args=..., env=..., cwd=...)
+            streamable_http → cls(endpoint=...)
+        """
+        if spec.transport == "stdio":
+            return cls(
+                command=spec.command,
+                args=list(spec.args),
+                env=dict(spec.env) if spec.env else None,
+                cwd=spec.cwd,
+            )
+        return cls(endpoint=spec.endpoint)
 
     async def connect(self) -> None:
         """Open the configured transport and wrap it in a ClientSession.
