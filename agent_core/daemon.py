@@ -16,6 +16,7 @@ from agent_core.protocol import (
     ChatMessage,
     CommandMessage,
     ErrorMessage,
+    ToolApprovalResponseMessage,
     decode_message,
     encode_message,
 )
@@ -102,6 +103,8 @@ class Daemon:
                         self._run_handler(self.agent.handle_command, msg, ctx, writer),
                     )
                     owned_tasks.append(task)
+                elif isinstance(msg, ToolApprovalResponseMessage):
+                    self._route_approval_response(msg)
                 else:
                     # Synchronous dispatch for agent-specific message types
                     # (approval responses, batch fallback choices, etc.).
@@ -147,3 +150,25 @@ class Daemon:
                 await writer.drain()
             except Exception:
                 pass
+
+    def _route_approval_response(self, msg) -> None:
+        """Resolve a pending tool-call approval gate. KeyError on unknown/expired
+        proposal_id is expected (the awaiting call may have already timed out or
+        been cancelled) and is swallowed."""
+        registry = getattr(self.agent, "tool_approval_registry", None)
+        if registry is None:
+            return
+        from agent_core.workers.tool_approval import ToolDecision
+        try:
+            registry.resolve(
+                msg.proposal_id,
+                ToolDecision(
+                    approved=msg.approved,
+                    justification=msg.justification,
+                    scope=msg.scope,
+                ),
+            )
+        except KeyError:
+            logger.warning(
+                "approval response for unknown/expired proposal_id=%s", msg.proposal_id,
+            )

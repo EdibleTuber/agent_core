@@ -14,6 +14,7 @@ import logging
 from agent_core.agent import Agent
 from agent_core.allowlist import AllowlistManager
 from agent_core.approval_registry import ApprovalRegistry
+from agent_core.workers.tool_approval import ToolApprovalRegistry
 from agent_core.channels import ChannelStore
 from agent_core.config import BaseConfig, load_config
 from agent_core.daemon import Daemon
@@ -93,6 +94,7 @@ def run_daemon(
     agent.learning = LearningManager(config.vault_path, agent_name=agent.name)
     agent.allowlist = AllowlistManager(config.vault_path, agent_name=agent.name)
     agent.approval_registry = ApprovalRegistry()
+    agent.tool_approval_registry = ToolApprovalRegistry()
     agent.channels = ChannelStore(
         vault_path=config.vault_path,
         agent_name=agent.name,
