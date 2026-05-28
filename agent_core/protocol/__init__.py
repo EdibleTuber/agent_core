@@ -6,6 +6,8 @@ from agent_core.protocol.messages import (
     LearningCandidateProposalMessage,
     ResponseMessage,
     StreamChunkMessage,
+    ToolApprovalRequestMessage,
+    ToolApprovalResponseMessage,
     ToolProgressMessage,
 )
 from agent_core.protocol.transport import (
@@ -23,6 +25,8 @@ __all__ = [
     "LearningCandidateProposalMessage",
     "ResponseMessage",
     "StreamChunkMessage",
+    "ToolApprovalRequestMessage",
+    "ToolApprovalResponseMessage",
     "ToolProgressMessage",
     "decode_message",
     "encode_message",

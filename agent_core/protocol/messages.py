@@ -61,3 +61,25 @@ class LearningCandidateProposalMessage:
     body: str
     trigger_excerpt: str  # user-message fragment that triggered the scan
     type: str = "learning_candidate_proposal"
+
+
+@register_message
+@dataclass
+class ToolApprovalRequestMessage:
+    proposal_id: str
+    worker: str
+    tool: str
+    arguments: dict
+    declared_tier: str
+    effective_tier: str
+    type: str = "tool_approval_request"
+
+
+@register_message
+@dataclass
+class ToolApprovalResponseMessage:
+    proposal_id: str
+    approved: bool
+    justification: str | None = None
+    scope: str = "once"
+    type: str = "tool_approval_response"
