@@ -108,6 +108,7 @@ Outcome = Literal[
     "validation_failed",
     "timeout",
     "cancelled",
+    "approval_undeliverable",
 ]
 
 
