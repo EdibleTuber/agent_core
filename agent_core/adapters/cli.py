@@ -7,6 +7,7 @@ for messages the renderer doesn't claim.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -21,8 +22,68 @@ from agent_core.protocol import (
     LearningCandidateProposalMessage,
     ResponseMessage,
     StreamChunkMessage,
+    ToolApprovalRequestMessage,
+    ToolApprovalResponseMessage,
     ToolProgressMessage,
 )
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_MAX_ARG_DISPLAY = 1000
+
+
+def _sanitize_args(arguments: dict) -> str:
+    rendered = []
+    for k, v in (arguments or {}).items():
+        s = _CONTROL_CHARS.sub(" ", str(v))
+        if len(s) > 200:
+            s = s[:200] + f"...(+{len(s) - 200} chars)"
+        rendered.append(f"{k}={s}")
+    out = ", ".join(rendered)
+    if len(out) > _MAX_ARG_DISPLAY:
+        out = out[:_MAX_ARG_DISPLAY] + "...(truncated)"
+    return out
+
+
+async def handle_approval_request(msg, prompt_fn, send_fn) -> None:
+    """Render an approval request, collect the operator decision, send the
+    response. prompt_fn(prompt_str)->str and send_fn(message)->None are
+    injected so this is testable without a live socket."""
+    is_critical = msg.effective_tier == "critical"
+    print(f"\n--- approval required ---")
+    print(f"  {msg.worker}.{msg.tool}  (declared={msg.declared_tier} effective={msg.effective_tier})")
+    print(f"  args: {_sanitize_args(msg.arguments)}")
+    opts = "[n/j]" if is_critical else "[y/n/j/a]"
+    try:
+        answer = (await prompt_fn(f"  approve? {opts}: ")).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        await send_fn(ToolApprovalResponseMessage(
+            proposal_id=msg.proposal_id, approved=False, justification="cancelled"))
+        return
+
+    # Critical: never accept bare y/a — must justify.
+    if is_critical and answer in ("y", "a"):
+        answer = "j"
+
+    if answer == "j":
+        try:
+            justification = (await prompt_fn("  justification: ")).strip()
+        except (KeyboardInterrupt, EOFError):
+            justification = ""
+        approved = bool(justification) if is_critical else True
+        await send_fn(ToolApprovalResponseMessage(
+            proposal_id=msg.proposal_id, approved=approved,
+            justification=justification or None, scope="once"))
+    elif answer == "y":
+        await send_fn(ToolApprovalResponseMessage(
+            proposal_id=msg.proposal_id, approved=True, justification=None, scope="once"))
+    elif answer == "a":
+        await send_fn(ToolApprovalResponseMessage(
+            proposal_id=msg.proposal_id, approved=True, justification=None, scope="session"))
+    else:
+        await send_fn(ToolApprovalResponseMessage(
+            proposal_id=msg.proposal_id, approved=False,
+            justification="declined at CLI"))
 
 
 @runtime_checkable
@@ -82,6 +143,13 @@ async def run_repl(socket_path: Path, renderer: Renderer) -> None:
 
             # Drain responses until the daemon signals end-of-turn.
             async for msg in conn.receive():
+                if isinstance(msg, ToolApprovalRequestMessage):
+                    await handle_approval_request(
+                        msg,
+                        prompt_fn=session.prompt_async,
+                        send_fn=conn.send,
+                    )
+                    continue
                 rendered = renderer.format_message(msg)
                 if rendered is None:
                     rendered = _default_format(msg)
