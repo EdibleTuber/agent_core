@@ -125,6 +125,7 @@ class AuditEntry(BaseModel):
     declared_tier: RiskTier
     effective_tier: RiskTier
     override_reason: str | None = None
+    detail: str | None = None
     outcome: Outcome
     latency_ms: int
     session_guid: str
