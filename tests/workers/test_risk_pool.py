@@ -144,7 +144,7 @@ async def test_session_scope_skips_subsequent_prompt(tmp_path):
     assert len(sent) == 1                      # second call did not prompt
     assert len(inner.calls) == 2               # both executed
     rows = _audit_lines(tmp_path)
-    assert rows[1]["override_reason"] == "session-approved"
+    assert rows[1]["detail"] == "session-approved"
 
 
 @pytest.mark.asyncio
@@ -182,7 +182,7 @@ async def test_audit_justification_with_json_payload_round_trips(tmp_path):
     pool = _pool(inner, [_spec("frida", "high")], reg=reg, audit_dir=tmp_path, send=send)
     await pool.call_tool("frida", "exec", {})
     rows = _audit_lines(tmp_path)              # parses cleanly -> no injection
-    assert len(rows) == 1 and rows[0]["override_reason"] == evil
+    assert len(rows) == 1 and rows[0]["detail"] == evil
 
 
 @pytest.mark.asyncio
@@ -209,3 +209,75 @@ async def test_list_tools_and_close_proxy_ungated(tmp_path):
     await pool.list_tools("frida")             # no prompt, no audit
     await pool.close_all()
     assert list(tmp_path.glob("audit-*.jsonl")) == []
+
+
+@pytest.mark.asyncio
+async def test_approved_high_inner_error_audits_error(tmp_path):
+    inner = _InnerPool()
+    inner.raise_on_call = False
+    reg = ToolApprovalRegistry()
+    async def send(m):
+        reg.resolve(m.proposal_id, ToolDecision(approved=True, justification=None))
+    pool = _pool(inner, [_spec("frida", "high")], reg=reg, audit_dir=tmp_path, send=send)
+    # make the inner result report isError
+    async def erroring_call(worker, tool, arguments):
+        inner.calls.append((worker, tool, arguments))
+        class _R: content = []; isError = True
+        return _R()
+    inner.call_tool = erroring_call
+    out = await pool.call_tool("frida", "exec", {})
+    assert inner.calls == [("frida", "exec", {})]      # it WAS approved + executed
+    rows = _audit_lines(tmp_path)
+    assert rows[0]["outcome"] == "error"               # execution truth wins, not hitl_approved
+
+
+@pytest.mark.asyncio
+async def test_gate_override_reason_is_audited(tmp_path):
+    inner = _InnerPool()
+    reg = ToolApprovalRegistry()
+    sent = []
+    async def send(m):
+        sent.append(m)
+        reg.resolve(m.proposal_id, ToolDecision(approved=True, justification=None))
+    # worker declares low, but a name-pattern override escalates frida_exec to high
+    gate = RiskGate(overrides=[("frida_exec", "high")])
+    pool = _pool(inner, [_spec("frida", "low")], gate=gate, reg=reg, audit_dir=tmp_path, send=send)
+    await pool.call_tool("frida", "exec", {})
+    assert len(sent) == 1                               # escalation forced an approval prompt
+    rows = _audit_lines(tmp_path)
+    assert rows[0]["declared_tier"] == "low"
+    assert rows[0]["effective_tier"] == "high"
+    assert rows[0]["override_reason"] == "name pattern 'frida_exec' forces high"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_cleans_up_pending(tmp_path):
+    inner = _InnerPool()
+    reg = ToolApprovalRegistry(default_timeout_seconds=5.0)
+    captured = []
+    async def send(m): captured.append(m)   # never resolves
+    pool = _pool(inner, [_spec("frida", "high")], reg=reg, audit_dir=tmp_path, send=send)
+    task = asyncio.create_task(pool.call_tool("frida", "exec", {}))
+    while not captured:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reg._pending == {}                # finally: discard cleaned up
+    assert inner.calls == []                 # inner never reached
+
+
+@pytest.mark.asyncio
+async def test_unknown_worker_defaults_to_high_and_prompts(tmp_path):
+    inner = _InnerPool()
+    reg = ToolApprovalRegistry()
+    sent = []
+    async def send(m):
+        sent.append(m)
+        reg.resolve(m.proposal_id, ToolDecision(approved=True, justification=None))
+    # specs does NOT include "ghost"
+    pool = _pool(inner, [_spec("frida", "low")], reg=reg, audit_dir=tmp_path, send=send)
+    await pool.call_tool("ghost", "doit", {})
+    assert len(sent) == 1                     # unknown worker -> high -> prompted
+    rows = _audit_lines(tmp_path)
+    assert rows[0]["declared_tier"] == "high"

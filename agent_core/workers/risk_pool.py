@@ -69,24 +69,24 @@ class RiskAwareToolPool:
         declared = spec.risk_default if spec else "high"  # unknown worker -> fail safe-ish
         decision = self._gate.evaluate(worker=worker, tool=tool, declared_tier=declared)
         effective = decision.effective_tier
+        gate_override = decision.override_reason  # why escalated (None if declared==effective)
 
-        gate_reason: str | None = None
+        session_note: str | None = None
         if effective in ("high", "critical"):
-            # Session-approved low-risk shortcut (never for critical).
             if effective != "critical" and (worker, tool) in self._session_approved:
-                gate_reason = "session-approved"
+                session_note = "session-approved"
             else:
                 blocked = await self._await_operator(
-                    worker, tool, snapshot, declared, effective,
+                    worker, tool, snapshot, declared, effective, gate_override,
                 )
                 if blocked is not None:  # denied / undeliverable / timeout
                     return blocked
 
         return await self._execute_and_audit(
-            worker, tool, arguments, snapshot, declared, effective, gate_reason,
+            worker, tool, arguments, snapshot, declared, effective, gate_override, session_note,
         )
 
-    async def _await_operator(self, worker, tool, snapshot, declared, effective):
+    async def _await_operator(self, worker, tool, snapshot, declared, effective, gate_override):
         """Returns an _ErrorResult if the call should NOT proceed, else None."""
         from agent_core.protocol.messages import ToolApprovalRequestMessage
 
@@ -104,7 +104,7 @@ class RiskAwareToolPool:
         except Exception as exc:
             self._registry.discard(proposal_id)
             self._emit(worker, tool, snapshot, declared, effective, 0,
-                       "approval_undeliverable", exc.__class__.__name__)
+                       "approval_undeliverable", gate_override, exc.__class__.__name__)
             return _ErrorResult(f"{worker}.{tool} blocked: approval channel unavailable")
         try:
             decision = await future
@@ -117,39 +117,39 @@ class RiskAwareToolPool:
 
         if not decision.approved:
             self._emit(worker, tool, snapshot, declared, effective, 0,
-                       "hitl_denied", decision.justification)
+                       "hitl_denied", gate_override, decision.justification)
             return _ErrorResult(f"{worker}.{tool} denied by operator: {decision.justification or 'no reason given'}")
 
         if decision.scope == "session" and effective != "critical":
             self._session_approved.add((worker, tool))
         return None  # approved -> proceed
 
-    async def _execute_and_audit(self, worker, tool, arguments, snapshot, declared, effective, gate_reason):
+    async def _execute_and_audit(self, worker, tool, arguments, snapshot, declared, effective, gate_override, session_note):
         start = time.monotonic()
         try:
             result = await self._inner.call_tool(worker, tool, arguments)
         except Exception as exc:
             self._emit(worker, tool, snapshot, declared, effective,
                        int((time.monotonic() - start) * 1000),
-                       "error", exc.__class__.__name__)
+                       "error", gate_override, exc.__class__.__name__)
             return _ErrorResult(f"{worker}.{tool} call failed: {exc}")
         latency = int((time.monotonic() - start) * 1000)
         is_error = bool(getattr(result, "isError", False))
-        if gate_reason == "session-approved":
-            outcome = "hitl_approved"
-        elif effective in ("high", "critical"):
+        if is_error:
+            outcome = "error"
+        elif session_note == "session-approved" or effective in ("high", "critical"):
             outcome = "hitl_approved"
         else:
-            outcome = "error" if is_error else "ok"
-        self._emit(worker, tool, snapshot, declared, effective, latency, outcome, gate_reason)
+            outcome = "ok"
+        self._emit(worker, tool, snapshot, declared, effective, latency, outcome, gate_override, session_note)
         return result
 
-    def _emit(self, worker, tool, snapshot, declared, effective, latency_ms, outcome, reason):
+    def _emit(self, worker, tool, snapshot, declared, effective, latency_ms, outcome, override_reason, detail):
         self._audit.append(AuditEntry(
             request_id=uuid.uuid4().hex,
             worker=worker, tool=tool, args=snapshot,
             declared_tier=declared, effective_tier=effective,
-            override_reason=reason, outcome=outcome,
+            override_reason=override_reason, detail=detail, outcome=outcome,
             latency_ms=latency_ms, session_guid="pending",
             worker_contract_version=1,
         ))
