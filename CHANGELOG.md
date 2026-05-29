@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.5.0] - 2026-05-28
+
+### Added
+- `agent_core.workers.risk_pool.RiskAwareToolPool` — composes an `MCPClientPool` and enforces `RiskGate` at the `call_tool` chokepoint. `low`/`medium` tiers auto-execute; `high`/`critical` block on operator approval; every dispatch emits one `AuditEntry`. `list_tools`/`close_all` proxy to the inner pool ungated (discovery stays read-only). Approval delivery is fail-closed: if the approval channel raises, the call is denied (`outcome="approval_undeliverable"`) rather than waiting out the timeout.
+- `agent_core.workers.tool_approval` — `ToolApprovalRegistry` (per-call HITL gates keyed by `proposal_id`, with idempotent `discard()` cleanup and a timeout that auto-denies), plus `ToolCallSpec` and `ToolDecision` (carries `approved`, `justification`, and an `once`/`session` scope).
+- `ToolApprovalRequestMessage` / `ToolApprovalResponseMessage` protocol messages. The CLI renders an inline `[y/n/j/a]` approval prompt (`a` = approve-for-session; `critical` tier forces a justification and disallows bare `y`/`a`; Ctrl-C/EOF denies). The daemon routes responses to the registry at chassis level (independent of any agent's `handle_other`).
+- `AuditEntry.detail` field — carries the operator justification, an exception class name, or a session-approval note, keeping `override_reason` reserved for the RiskGate escalation reason.
+- `"approval_undeliverable"` member added to the audit `Outcome` literal.
+
+### Notes
+- `worker_contract_version` stays at `1`. **Purely additive** — no existing public signatures changed. `make_tool_class` and `discover_and_register` are untouched; an agent opts into enforcement by passing a `RiskAwareToolPool` where it previously passed an `MCPClientPool`.
+- `risk_default` in `workers.yaml` becomes live policy when dispatch goes through `RiskAwareToolPool`. `kind: external_mcp` auto-bump and `risk_overrides:` patterns remain unimplemented (tracked follow-ups).
+- Audit `outcome` reflects execution truth: an approved call whose inner result errors is audited `"error"`, not `"hitl_approved"`.
+- PAL consumers can bump the pin transparently; PAL doesn't use MCP workers in v1.
+
 ## [1.4.0] - 2026-05-25
 
 ### Added
