@@ -281,3 +281,50 @@ async def test_unknown_worker_defaults_to_high_and_prompts(tmp_path):
     assert len(sent) == 1                     # unknown worker -> high -> prompted
     rows = _audit_lines(tmp_path)
     assert rows[0]["declared_tier"] == "high"
+
+
+class _Ctx:
+    """Minimal stand-in for HandlerContext carrying an awaitable emit."""
+    def __init__(self, emit):
+        self.emit = emit
+
+
+@pytest.mark.asyncio
+async def test_ctx_emit_is_preferred_over_constructor_send(tmp_path):
+    inner = _InnerPool()
+    reg = ToolApprovalRegistry()
+
+    async def constructor_send(m):
+        raise AssertionError("constructor send_message used instead of ctx.emit")
+
+    emit_calls = []
+    async def ctx_emit(m):
+        emit_calls.append(m)
+        reg.resolve(m.proposal_id, ToolDecision(approved=True, justification=None))
+
+    pool = _pool(inner, [_spec("frida", "high")], reg=reg, audit_dir=tmp_path, send=constructor_send)
+    await pool.call_tool("frida", "exec", {"x": 1}, ctx=_Ctx(ctx_emit))
+    assert len(emit_calls) == 1          # request went out via ctx.emit
+    assert inner.calls == [("frida", "exec", {"x": 1})]   # approved + executed
+    assert _audit_lines(tmp_path)[0]["outcome"] == "hitl_approved"
+
+
+@pytest.mark.asyncio
+async def test_no_send_channel_fails_closed(tmp_path):
+    inner = _InnerPool()
+    reg = ToolApprovalRegistry(default_timeout_seconds=5.0)
+    # neither ctx (with emit) nor a constructor send_message
+    pool = RiskAwareToolPool(
+        inner=inner,
+        specs={s.name: s for s in [_spec("frida", "high")]},
+        risk_gate=RiskGate(overrides=[]),
+        approval_registry=reg,
+        audit_log=AuditLog(tmp_path),
+        send_message=None,
+    )
+    out = await pool.call_tool("frida", "exec", {})   # no ctx
+    assert getattr(out, "isError", False)
+    assert inner.calls == []
+    rows = _audit_lines(tmp_path)
+    assert rows[0]["outcome"] == "approval_undeliverable"
+    assert reg._pending == {}     # no entry created when there's no channel

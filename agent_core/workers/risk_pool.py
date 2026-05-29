@@ -45,7 +45,7 @@ class RiskAwareToolPool:
         risk_gate: RiskGate,
         approval_registry: ToolApprovalRegistry,
         audit_log: AuditLog,
-        send_message: SendMessage,
+        send_message: SendMessage | None = None,
     ) -> None:
         self._inner = inner
         self._specs = specs
@@ -63,7 +63,7 @@ class RiskAwareToolPool:
         await self._inner.close_all()
 
     # --- gated dispatch --------------------------------------------------
-    async def call_tool(self, worker: str, tool: str, arguments: dict[str, Any]):
+    async def call_tool(self, worker: str, tool: str, arguments: dict[str, Any], ctx: Any = None):
         snapshot = copy.deepcopy(arguments) if isinstance(arguments, dict) else {}
         spec = self._specs.get(worker)
         declared = spec.risk_default if spec else "high"  # unknown worker -> fail safe-ish
@@ -76,8 +76,9 @@ class RiskAwareToolPool:
             if effective != "critical" and (worker, tool) in self._session_approved:
                 session_note = "session-approved"
             else:
+                send = self._resolve_send(ctx)
                 blocked = await self._await_operator(
-                    worker, tool, snapshot, declared, effective, gate_override,
+                    worker, tool, snapshot, declared, effective, gate_override, send,
                 )
                 if blocked is not None:  # denied / undeliverable / timeout
                     return blocked
@@ -86,9 +87,23 @@ class RiskAwareToolPool:
             worker, tool, arguments, snapshot, declared, effective, gate_override, session_note,
         )
 
-    async def _await_operator(self, worker, tool, snapshot, declared, effective, gate_override):
+    def _resolve_send(self, ctx):
+        """Prefer the per-request connection channel (ctx.emit); fall back to a
+        constructor-supplied send_message (used by tests); None means no channel."""
+        emit = getattr(ctx, "emit", None) if ctx is not None else None
+        if callable(emit):
+            return emit
+        return self._send
+
+    async def _await_operator(self, worker, tool, snapshot, declared, effective, gate_override, send):
         """Returns an _ErrorResult if the call should NOT proceed, else None."""
         from agent_core.protocol.messages import ToolApprovalRequestMessage
+
+        if send is None:
+            # No approval channel available -> fail closed (no registry entry created).
+            self._emit(worker, tool, snapshot, declared, effective, 0,
+                       "approval_undeliverable", gate_override, "no approval channel")
+            return _ErrorResult(f"{worker}.{tool} blocked: no approval channel available")
 
         spec = ToolCallSpec(
             worker=worker, tool=tool, arguments=snapshot,
@@ -100,7 +115,7 @@ class RiskAwareToolPool:
             arguments=snapshot, declared_tier=declared, effective_tier=effective,
         )
         try:
-            await self._send(req)
+            await send(req)
         except Exception as exc:
             self._registry.discard(proposal_id)
             self._emit(worker, tool, snapshot, declared, effective, 0,
@@ -111,7 +126,6 @@ class RiskAwareToolPool:
         finally:
             self._registry.discard(proposal_id)  # idempotent: covers cancel/normal/timeout
 
-        # Critical requires a non-empty justification even on approval.
         if effective == "critical" and decision.approved and not (decision.justification or "").strip():
             decision = ToolDecision(approved=False, justification="justification required for critical tier")
 
