@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.5.1] - 2026-05-28
+
+### Changed
+- `RiskAwareToolPool.call_tool` now accepts an optional `ctx` and sources the approval channel from the per-request `ctx.emit` (the connection the request arrived on), falling back to the constructor `send_message` (now optional) and failing closed (`approval_undeliverable`) if neither is available. `make_tool_class`'s synthesized tool now threads its `ctx` into `pool.call_tool`. `MCPClientPool.call_tool` accepts and ignores an optional `ctx`.
+- This fixes approval delivery under the real daemon (multi-connection): the v1.5.0 constructor-bound `send_message` could not target the requesting connection. Additive and backward-compatible — existing callers passing `send_message` and no `ctx` are unchanged.
+
 ## [1.5.0] - 2026-05-28
 
 ### Added

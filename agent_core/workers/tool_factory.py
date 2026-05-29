@@ -58,7 +58,7 @@ def make_tool_class(
 
     async def _run(self, args: dict[str, Any], ctx: Any) -> str:
         try:
-            result = await pool.call_tool(worker.name, tool_name, args)
+            result = await pool.call_tool(worker.name, tool_name, args, ctx=ctx)
         except Exception as exc:
             return f"{prefixed} call failed: {exc}"
         if getattr(result, "isError", False):

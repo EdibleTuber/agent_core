@@ -59,7 +59,7 @@ async def test_factory_run_calls_pool_call_tool():
     ctx = MagicMock()
     out = await tool.run({"message": "hello"}, ctx)
 
-    pool.call_tool.assert_awaited_once_with("stub", "noop_low", {"message": "hello"})
+    pool.call_tool.assert_awaited_once_with("stub", "noop_low", {"message": "hello"}, ctx=ctx)
     assert "ok" in out  # text block content surfaces in the return string
 
 

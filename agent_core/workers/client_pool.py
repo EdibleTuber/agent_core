@@ -37,7 +37,7 @@ class MCPClientPool:
         client = await self._ensure_connected(worker)
         return await client.list_tools()
 
-    async def call_tool(self, worker: str, tool: str, arguments: dict[str, Any]):
+    async def call_tool(self, worker: str, tool: str, arguments: dict[str, Any], ctx: Any = None):
         client = await self._ensure_connected(worker)
         return await client.call_tool(tool, arguments)
 
