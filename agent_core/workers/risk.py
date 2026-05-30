@@ -9,12 +9,55 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass
-from typing import get_args
+from typing import Tuple, get_args
 
-from agent_core.workers.types import RiskTier
+from agent_core.workers.types import RiskTier, WorkerSpec
 
 
 _TIER_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+RISK_TIER_META_KEY = "agent_core/risk_tier"
+
+_VALID_TIERS = set(_TIER_RANK)
+
+
+def _max_tier(a: RiskTier, b: RiskTier) -> RiskTier:
+    return a if _TIER_RANK[a] >= _TIER_RANK[b] else b
+
+
+def resolve_declared_tier(
+    spec: WorkerSpec | None, advertised: str | None
+) -> Tuple[RiskTier, str]:
+    """Resolve the declared tier for a tool call from the worker-wide floor
+    and the per-tool tier advertised over the wire.
+
+    Returns (tier, tier_source) where tier_source is one of:
+      "wire"          advertised tier escalated above the floor
+      "floor"         floor dominated (advertised <= floor, or external_mcp)
+      "fallback_safe" internal worker advertised no/invalid tier -> max(floor, high)
+      "unknown_worker" spec is None -> "high"
+
+    Rules:
+      - Unknown worker (spec is None): "high" (fail safe-ish; matches prior behavior).
+      - external_mcp: floor only (per-tool wire tiers are not honored; out of scope).
+      - internal + valid advertised: max(floor, advertised). source="wire" if it
+        escalated above the floor, else "floor".
+      - internal + missing/invalid advertised: max(floor, "high"). source="fallback_safe".
+    """
+    if spec is None:
+        return ("high", "unknown_worker")
+
+    floor: RiskTier = spec.risk_default
+    if spec.kind == "external_mcp":
+        return (floor, "floor")
+
+    if advertised in _VALID_TIERS:
+        resolved = _max_tier(floor, advertised)  # type: ignore[arg-type]
+        source = "wire" if _TIER_RANK[advertised] > _TIER_RANK[floor] else "floor"  # type: ignore[index]
+        return (resolved, source)
+
+    # internal worker advertised nothing usable: fail safe, never below "high"
+    return (_max_tier(floor, "high"), "fallback_safe")
 
 
 @dataclass(frozen=True)
