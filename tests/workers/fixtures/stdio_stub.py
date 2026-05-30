@@ -16,12 +16,12 @@ from fastmcp import FastMCP
 def build_stub() -> FastMCP:
     mcp = FastMCP("agent-core-stdio-stub-worker")
 
-    @mcp.tool()
+    @mcp.tool(meta={"agent_core/risk_tier": "low"})
     def noop_low(message: str = "hi") -> dict:
         """A toy tool that returns ok with the input echoed."""
         return {"status": "ok", "echo": message}
 
-    @mcp.tool()
+    @mcp.tool(meta={"agent_core/risk_tier": "high"})
     def risky_high(target: str) -> dict:
         """A toy tool that pretends to do something risky."""
         return {"status": "did the thing", "target": target}

@@ -13,12 +13,32 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from agent_core.workers.risk import RISK_TIER_META_KEY
 from agent_core.workers.types import (
     WORKER_CONTRACT_VERSION,
 )
 
 if TYPE_CHECKING:
     from agent_core.workers.types import WorkerSpec
+
+
+_WIRE_VALID_TIERS = {"low", "medium", "high", "critical"}
+
+
+def _assert_valid_risk_tier_meta(tool: Any) -> None:
+    """Assert a live tool advertises a valid risk_tier in its MCP `_meta`.
+
+    Shared by the stdio and streamable_http live-conformance suites so the
+    wire contract is enforced identically on both transports. A worker that
+    fails to advertise a valid per-tool tier is rejected at build/test time,
+    which is the compensating control that lets dispatch fall back to the
+    risk_default floor without a runtime fail-safe (see resolve_declared_tier)."""
+    meta = getattr(tool, "meta", None) or {}
+    tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else None
+    assert tier in _WIRE_VALID_TIERS, (
+        f"tool {getattr(tool, 'name', tool)!r} must advertise a valid "
+        f"{RISK_TIER_META_KEY!r} in _meta over the wire, got {tier!r}"
+    )
 
 
 @runtime_checkable
@@ -160,6 +180,7 @@ async def assert_streamable_http_conformance(endpoint: str) -> None:
             assert "type" in schema, (
                 f"tool {tool.name!r} inputSchema missing top-level 'type'"
             )
+            _assert_valid_risk_tier_meta(tool)
     finally:
         try:
             await client.close()
@@ -244,6 +265,7 @@ async def assert_stdio_conformance(spec: "WorkerSpec") -> None:
             assert "type" in schema, (
                 f"tool {tool.name!r} inputSchema missing top-level 'type'"
             )
+            _assert_valid_risk_tier_meta(tool)
     finally:
         try:
             await client.close()
