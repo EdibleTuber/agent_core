@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.6.0] - 2026-05-30
+
+### Added
+- Per-tool `risk_tier` now flows over the MCP wire. A worker advertises each tool's tier in the tool's `_meta` under the key `agent_core/risk_tier` (exported as `agent_core.workers.risk.RISK_TIER_META_KEY`). `RiskAwareToolPool.list_tools` captures advertised tiers into an internal `{(worker, tool): tier}` cache during discovery; `call_tool` resolves the declared tier from it.
+- `agent_core.workers.risk.resolve_declared_tier(spec, advertised) -> (tier, tier_source)` — the resolution helper. Escalate-only, monotonic: the declared tier is `max(risk_default_floor, advertised_wire_tier)`. `tier_source` ∈ `{"wire","floor","invalid_advertised","unknown_worker"}` for audit provenance.
+- `WorkerRegistry` parses a top-level `risk_overrides:` list (`[pattern, tier]` pairs) from `workers.yaml`, exposed via `WorkerRegistry.risk_overrides()` — intended to feed `RiskGate(overrides=...)` as the authoritative operator-pin ceiling. (Implements the v1.5.0 tracked follow-up.)
+- `AuditEntry.tier_source` (nullable) — records the provenance of `declared_tier` so an auditor can tell a wire-advertised tier from a floor default or malformed wire data.
+- Live conformance (`assert_stdio_conformance`, `assert_streamable_http_conformance`) now asserts every tool advertises a valid `risk_tier` in `_meta`, via the shared `_assert_valid_risk_tier_meta` check. This is the build-time control that backs the runtime floor-fallback.
+
+### Changed
+- `risk_default` in `workers.yaml` is now a **floor**, not the sole signal: `effective = max(floor, advertised_wire_tier, operator_pin)`, all escalate-only.
+- **A missing/invalid advertised tier falls back to the `risk_default` floor** (NOT a dispatch-time fail-safe to `high`). Rationale ("Option C"): safety for dangerous tools comes from mandatory operator pins (`risk_overrides`) + build-time conformance, not a runtime fail-safe. This keeps legacy non-advertising internal workers working on their `risk_default`; they auto-upgrade to full wire-tier escalation the day they start advertising `_meta` tiers. A malformed (non-str / unknown) advertised tier is handled gracefully (no crash on unhashable input) and flagged `tier_source="invalid_advertised"`. `spec is None` (dispatch to an unregistered worker) still resolves to `"high"`.
+
+### Notes
+- `worker_contract_version` stays at `1`. **Purely additive** to public signatures — `discovery.py`, `tool_factory.py`, `client_pool.py` untouched (the v1.5.0 pool-wrap architecture is preserved). **Behavior change** for `kind="internal"` workers that advertise `_meta` tiers: their per-tool tier now escalates the floor. `external_mcp` and non-advertising workers are unchanged.
+- The `kind: external_mcp` auto-bump remains unimplemented (out of scope); per-tool wire tiers are not honored for `external_mcp` (floor only).
+
 ## [1.5.1] - 2026-05-28
 
 ### Changed
