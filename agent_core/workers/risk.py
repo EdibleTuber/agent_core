@@ -42,9 +42,10 @@ def resolve_declared_tier(
     to full wire-tier escalation the day they start advertising.
 
     Returns (tier, tier_source) where tier_source is one of:
-      "wire"           advertised tier escalated above the floor
-      "floor"          floor used (advertised <= floor, external_mcp, or no/invalid tier)
-      "unknown_worker" spec is None (worker not registered) -> "high"
+      "wire"               advertised tier escalated above the floor
+      "floor"              floor used (advertised <= floor, external_mcp, or no tier)
+      "invalid_advertised" worker sent a malformed tier -> floor (flagged for audit)
+      "unknown_worker"     spec is None (worker not registered) -> "high"
 
     Rules:
       - Unknown worker (spec is None, i.e. dispatch to an unregistered worker):
@@ -52,7 +53,12 @@ def resolve_declared_tier(
       - external_mcp: floor only (per-tool wire tiers are not honored; out of scope).
       - valid advertised: max(floor, advertised). source="wire" if it escalated
         above the floor, else "floor".
-      - missing/invalid advertised: the floor (risk_default). source="floor".
+      - missing advertised (None): the floor. source="floor".
+      - invalid advertised (non-str, or a str that isn't a valid tier): the floor,
+        but source="invalid_advertised" so the audit trail flags malformed wire
+        data (a contract violation / possible tampering signal). Note `advertised`
+        may be hostile/arbitrary (dict, list, bool, ...) — the isinstance guard
+        below keeps the membership test from raising on unhashable input.
     """
     if spec is None:
         return ("high", "unknown_worker")
@@ -61,13 +67,15 @@ def resolve_declared_tier(
     if spec.kind == "external_mcp":
         return (floor, "floor")
 
-    if advertised in _VALID_TIERS:
+    if isinstance(advertised, str) and advertised in _VALID_TIERS:
         resolved = _max_tier(floor, advertised)  # type: ignore[arg-type]
         source = "wire" if _TIER_RANK[advertised] > _TIER_RANK[floor] else "floor"  # type: ignore[index]
         return (resolved, source)
 
-    # No usable advertised tier: fall back to the worker-wide floor.
-    return (floor, "floor")
+    # No usable advertised tier: fall back to the worker-wide floor. Distinguish
+    # "absent" from "malformed" so an auditor can spot a tampering/bug signal.
+    source = "floor" if advertised is None else "invalid_advertised"
+    return (floor, source)
 
 
 @dataclass(frozen=True)

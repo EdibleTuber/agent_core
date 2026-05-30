@@ -60,9 +60,14 @@ class RiskAwareToolPool:
     async def list_tools(self, worker: str):
         result = await self._inner.list_tools(worker)
         for tool in getattr(result, "tools", []) or []:
+            name = getattr(tool, "name", None)
+            if name is None:
+                # A nameless tool from a buggy/hostile worker must not abort
+                # discovery of the worker's remaining tools.
+                continue
             meta = getattr(tool, "meta", None) or {}
             tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else None
-            self._tool_tiers[(worker, tool.name)] = tier
+            self._tool_tiers[(worker, name)] = tier
         return result
 
     async def close_all(self) -> None:

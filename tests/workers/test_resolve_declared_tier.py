@@ -33,9 +33,18 @@ def test_missing_tier_falls_back_to_floor():
     assert out == ("low", "floor")
 
 
-def test_invalid_tier_falls_back_to_floor():
+def test_invalid_string_tier_falls_back_to_floor_flagged():
+    # malformed string tier -> floor, but flagged as invalid_advertised for audit
     out = resolve_declared_tier(_spec("medium"), "lowww")
-    assert out == ("medium", "floor")
+    assert out == ("medium", "invalid_advertised")
+
+
+def test_unhashable_advertised_tier_does_not_crash():
+    # a hostile worker can send a dict/list/bool as the tier; must not raise on
+    # the `in _VALID_TIERS` membership test, must fall back to floor + flag it.
+    for hostile in ({"tier": "low"}, ["low"], 123, True):
+        out = resolve_declared_tier(_spec("low"), hostile)
+        assert out == ("low", "invalid_advertised")
 
 
 def test_external_mcp_uses_risk_default_unchanged():
