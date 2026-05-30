@@ -26,15 +26,16 @@ def test_floor_dominates_when_advertised_is_lower():
     assert out == ("high", "floor")
 
 
-def test_missing_tier_internal_is_failsafe_high():
-    # internal worker, no advertised tier -> max(floor, "high")
+def test_missing_tier_falls_back_to_floor():
+    # internal worker, no advertised tier -> use the risk_default floor (Option C:
+    # no dispatch-time fail-safe; safety is via operator pins + conformance).
     out = resolve_declared_tier(_spec("low"), None)
-    assert out == ("high", "fallback_safe")
+    assert out == ("low", "floor")
 
 
-def test_invalid_tier_internal_is_failsafe_high():
+def test_invalid_tier_falls_back_to_floor():
     out = resolve_declared_tier(_spec("medium"), "lowww")
-    assert out == ("high", "fallback_safe")
+    assert out == ("medium", "floor")
 
 
 def test_external_mcp_uses_risk_default_unchanged():

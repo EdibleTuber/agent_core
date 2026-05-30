@@ -31,18 +31,28 @@ def resolve_declared_tier(
     """Resolve the declared tier for a tool call from the worker-wide floor
     and the per-tool tier advertised over the wire.
 
+    Model (escalate-only, monotonic): the declared tier is
+    ``max(risk_default_floor, advertised_wire_tier)``. The operator-pin layer
+    (RiskGate, applied above this) can escalate further. Safety for dangerous
+    tools that fail to advertise is provided by mandatory operator pins +
+    build-time conformance (which rejects missing/invalid tiers), NOT by a
+    dispatch-time fail-safe. A worker that advertises no tier simply uses its
+    ``risk_default`` floor — this keeps legacy non-advertising workers
+    (e.g. the apk_re_agents fleet) working unchanged, and they auto-upgrade
+    to full wire-tier escalation the day they start advertising.
+
     Returns (tier, tier_source) where tier_source is one of:
-      "wire"          advertised tier escalated above the floor
-      "floor"         floor dominated (advertised <= floor, or external_mcp)
-      "fallback_safe" internal worker advertised no/invalid tier -> max(floor, high)
-      "unknown_worker" spec is None -> "high"
+      "wire"           advertised tier escalated above the floor
+      "floor"          floor used (advertised <= floor, external_mcp, or no/invalid tier)
+      "unknown_worker" spec is None (worker not registered) -> "high"
 
     Rules:
-      - Unknown worker (spec is None): "high" (fail safe-ish; matches prior behavior).
+      - Unknown worker (spec is None, i.e. dispatch to an unregistered worker):
+        "high". This is about an unregistered worker, not a missing wire tier.
       - external_mcp: floor only (per-tool wire tiers are not honored; out of scope).
-      - internal + valid advertised: max(floor, advertised). source="wire" if it
-        escalated above the floor, else "floor".
-      - internal + missing/invalid advertised: max(floor, "high"). source="fallback_safe".
+      - valid advertised: max(floor, advertised). source="wire" if it escalated
+        above the floor, else "floor".
+      - missing/invalid advertised: the floor (risk_default). source="floor".
     """
     if spec is None:
         return ("high", "unknown_worker")
@@ -56,8 +66,8 @@ def resolve_declared_tier(
         source = "wire" if _TIER_RANK[advertised] > _TIER_RANK[floor] else "floor"  # type: ignore[index]
         return (resolved, source)
 
-    # internal worker advertised nothing usable: fail safe, never below "high"
-    return (_max_tier(floor, "high"), "fallback_safe")
+    # No usable advertised tier: fall back to the worker-wide floor.
+    return (floor, "floor")
 
 
 @dataclass(frozen=True)
