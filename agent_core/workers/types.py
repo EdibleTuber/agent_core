@@ -126,6 +126,10 @@ class AuditEntry(BaseModel):
     effective_tier: RiskTier
     override_reason: str | None = None
     detail: str | None = None
+    tier_source: str | None = None
+    """Provenance of declared_tier: "wire" | "floor" | "fallback_safe" |
+    "unknown_worker" | None (pre-v1.6 entries). Forensic honesty: lets an
+    auditor tell a low-tier dispatch advertised-low apart from a floor default."""
     outcome: Outcome
     latency_ms: int
     session_guid: str

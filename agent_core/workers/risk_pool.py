@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from agent_core.workers.audit import AuditLog
 from agent_core.workers.client_pool import MCPClientPool
-from agent_core.workers.risk import RiskGate
+from agent_core.workers.risk import RiskGate, RISK_TIER_META_KEY, resolve_declared_tier
 from agent_core.workers.tool_approval import (
     ToolApprovalRegistry, ToolCallSpec, ToolDecision,
 )
@@ -54,10 +54,21 @@ class RiskAwareToolPool:
         self._audit = audit_log
         self._send = send_message
         self._session_approved: set[tuple[str, str]] = set()
+        self._tool_tiers: dict[tuple[str, str], str | None] = {}
 
     # --- ungated proxies -------------------------------------------------
     async def list_tools(self, worker: str):
-        return await self._inner.list_tools(worker)
+        result = await self._inner.list_tools(worker)
+        for tool in getattr(result, "tools", []) or []:
+            name = getattr(tool, "name", None)
+            if name is None:
+                # A nameless tool from a buggy/hostile worker must not abort
+                # discovery of the worker's remaining tools.
+                continue
+            meta = getattr(tool, "meta", None) or {}
+            tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else None
+            self._tool_tiers[(worker, name)] = tier
+        return result
 
     async def close_all(self) -> None:
         await self._inner.close_all()
@@ -66,7 +77,10 @@ class RiskAwareToolPool:
     async def call_tool(self, worker: str, tool: str, arguments: dict[str, Any], ctx: Any = None):
         snapshot = copy.deepcopy(arguments) if isinstance(arguments, dict) else {}
         spec = self._specs.get(worker)
-        declared = spec.risk_default if spec else "high"  # unknown worker -> fail safe-ish
+        # A tool we never saw in discovery is treated as "no advertised tier"
+        # (None) -> resolve_declared_tier fails safe to "high" for internal workers.
+        advertised = self._tool_tiers.get((worker, tool))
+        declared, tier_source = resolve_declared_tier(spec, advertised)
         decision = self._gate.evaluate(worker=worker, tool=tool, declared_tier=declared)
         effective = decision.effective_tier
         gate_override = decision.override_reason  # why escalated (None if declared==effective)
@@ -79,12 +93,14 @@ class RiskAwareToolPool:
                 send = self._resolve_send(ctx)
                 blocked = await self._await_operator(
                     worker, tool, snapshot, declared, effective, gate_override, send,
+                    tier_source,
                 )
                 if blocked is not None:  # denied / undeliverable / timeout
                     return blocked
 
         return await self._execute_and_audit(
-            worker, tool, arguments, snapshot, declared, effective, gate_override, session_note,
+            worker, tool, arguments, snapshot, declared, effective, gate_override,
+            session_note, tier_source,
         )
 
     def _resolve_send(self, ctx):
@@ -95,14 +111,16 @@ class RiskAwareToolPool:
             return emit
         return self._send
 
-    async def _await_operator(self, worker, tool, snapshot, declared, effective, gate_override, send):
+    async def _await_operator(self, worker, tool, snapshot, declared, effective, gate_override, send,
+                              tier_source=None):
         """Returns an _ErrorResult if the call should NOT proceed, else None."""
         from agent_core.protocol.messages import ToolApprovalRequestMessage
 
         if send is None:
             # No approval channel available -> fail closed (no registry entry created).
             self._emit(worker, tool, snapshot, declared, effective, 0,
-                       "approval_undeliverable", gate_override, "no approval channel")
+                       "approval_undeliverable", gate_override, "no approval channel",
+                       tier_source)
             return _ErrorResult(f"{worker}.{tool} blocked: no approval channel available")
 
         spec = ToolCallSpec(
@@ -119,7 +137,8 @@ class RiskAwareToolPool:
         except Exception as exc:
             self._registry.discard(proposal_id)
             self._emit(worker, tool, snapshot, declared, effective, 0,
-                       "approval_undeliverable", gate_override, exc.__class__.__name__)
+                       "approval_undeliverable", gate_override, exc.__class__.__name__,
+                       tier_source)
             return _ErrorResult(f"{worker}.{tool} blocked: approval channel unavailable")
         try:
             decision = await future
@@ -131,21 +150,24 @@ class RiskAwareToolPool:
 
         if not decision.approved:
             self._emit(worker, tool, snapshot, declared, effective, 0,
-                       "hitl_denied", gate_override, decision.justification)
+                       "hitl_denied", gate_override, decision.justification,
+                       tier_source)
             return _ErrorResult(f"{worker}.{tool} denied by operator: {decision.justification or 'no reason given'}")
 
         if decision.scope == "session" and effective != "critical":
             self._session_approved.add((worker, tool))
         return None  # approved -> proceed
 
-    async def _execute_and_audit(self, worker, tool, arguments, snapshot, declared, effective, gate_override, session_note):
+    async def _execute_and_audit(self, worker, tool, arguments, snapshot, declared, effective, gate_override, session_note,
+                                 tier_source=None):
         start = time.monotonic()
         try:
             result = await self._inner.call_tool(worker, tool, arguments)
         except Exception as exc:
             self._emit(worker, tool, snapshot, declared, effective,
                        int((time.monotonic() - start) * 1000),
-                       "error", gate_override, exc.__class__.__name__)
+                       "error", gate_override, exc.__class__.__name__,
+                       tier_source)
             return _ErrorResult(f"{worker}.{tool} call failed: {exc}")
         latency = int((time.monotonic() - start) * 1000)
         is_error = bool(getattr(result, "isError", False))
@@ -155,15 +177,17 @@ class RiskAwareToolPool:
             outcome = "hitl_approved"
         else:
             outcome = "ok"
-        self._emit(worker, tool, snapshot, declared, effective, latency, outcome, gate_override, session_note)
+        self._emit(worker, tool, snapshot, declared, effective, latency, outcome, gate_override, session_note,
+                   tier_source)
         return result
 
-    def _emit(self, worker, tool, snapshot, declared, effective, latency_ms, outcome, override_reason, detail):
+    def _emit(self, worker, tool, snapshot, declared, effective, latency_ms, outcome, override_reason, detail,
+              tier_source=None):
         self._audit.append(AuditEntry(
             request_id=uuid.uuid4().hex,
             worker=worker, tool=tool, args=snapshot,
             declared_tier=declared, effective_tier=effective,
             override_reason=override_reason, detail=detail, outcome=outcome,
             latency_ms=latency_ms, session_guid="pending",
-            worker_contract_version=1,
+            worker_contract_version=1, tier_source=tier_source,
         ))

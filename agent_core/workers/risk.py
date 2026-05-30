@@ -9,12 +9,73 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass
-from typing import get_args
+from typing import Tuple, get_args
 
-from agent_core.workers.types import RiskTier
+from agent_core.workers.types import RiskTier, WorkerSpec
 
 
 _TIER_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+RISK_TIER_META_KEY = "agent_core/risk_tier"
+
+_VALID_TIERS = set(_TIER_RANK)
+
+
+def _max_tier(a: RiskTier, b: RiskTier) -> RiskTier:
+    return a if _TIER_RANK[a] >= _TIER_RANK[b] else b
+
+
+def resolve_declared_tier(
+    spec: WorkerSpec | None, advertised: str | None
+) -> Tuple[RiskTier, str]:
+    """Resolve the declared tier for a tool call from the worker-wide floor
+    and the per-tool tier advertised over the wire.
+
+    Model (escalate-only, monotonic): the declared tier is
+    ``max(risk_default_floor, advertised_wire_tier)``. The operator-pin layer
+    (RiskGate, applied above this) can escalate further. Safety for dangerous
+    tools that fail to advertise is provided by mandatory operator pins +
+    build-time conformance (which rejects missing/invalid tiers), NOT by a
+    dispatch-time fail-safe. A worker that advertises no tier simply uses its
+    ``risk_default`` floor — this keeps legacy non-advertising workers
+    (e.g. the apk_re_agents fleet) working unchanged, and they auto-upgrade
+    to full wire-tier escalation the day they start advertising.
+
+    Returns (tier, tier_source) where tier_source is one of:
+      "wire"               advertised tier escalated above the floor
+      "floor"              floor used (advertised <= floor, external_mcp, or no tier)
+      "invalid_advertised" worker sent a malformed tier -> floor (flagged for audit)
+      "unknown_worker"     spec is None (worker not registered) -> "high"
+
+    Rules:
+      - Unknown worker (spec is None, i.e. dispatch to an unregistered worker):
+        "high". This is about an unregistered worker, not a missing wire tier.
+      - external_mcp: floor only (per-tool wire tiers are not honored; out of scope).
+      - valid advertised: max(floor, advertised). source="wire" if it escalated
+        above the floor, else "floor".
+      - missing advertised (None): the floor. source="floor".
+      - invalid advertised (non-str, or a str that isn't a valid tier): the floor,
+        but source="invalid_advertised" so the audit trail flags malformed wire
+        data (a contract violation / possible tampering signal). Note `advertised`
+        may be hostile/arbitrary (dict, list, bool, ...) — the isinstance guard
+        below keeps the membership test from raising on unhashable input.
+    """
+    if spec is None:
+        return ("high", "unknown_worker")
+
+    floor: RiskTier = spec.risk_default
+    if spec.kind == "external_mcp":
+        return (floor, "floor")
+
+    if isinstance(advertised, str) and advertised in _VALID_TIERS:
+        resolved = _max_tier(floor, advertised)  # type: ignore[arg-type]
+        source = "wire" if _TIER_RANK[advertised] > _TIER_RANK[floor] else "floor"  # type: ignore[index]
+        return (resolved, source)
+
+    # No usable advertised tier: fall back to the worker-wide floor. Distinguish
+    # "absent" from "malformed" so an auditor can spot a tampering/bug signal.
+    source = "floor" if advertised is None else "invalid_advertised"
+    return (floor, source)
 
 
 @dataclass(frozen=True)
