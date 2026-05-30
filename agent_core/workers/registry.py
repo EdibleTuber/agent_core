@@ -22,6 +22,7 @@ class WorkerRegistry:
 
     def __init__(self) -> None:
         self._workers: dict[str, WorkerSpec] = {}
+        self._risk_overrides: list[tuple[str, str]] = []
 
     @classmethod
     def load(cls, path: Path | str) -> WorkerRegistry:
@@ -38,6 +39,13 @@ class WorkerRegistry:
         for name, fields in raw_workers.items():
             spec = WorkerSpec(name=name, **fields)
             reg._workers[spec.name] = spec
+
+        for pair in data.get("risk_overrides", []) or []:
+            if not (isinstance(pair, (list, tuple)) and len(pair) == 2):
+                raise ValueError(
+                    f"risk_overrides entry must be a [pattern, tier] pair, got {pair!r}"
+                )
+            reg._risk_overrides.append((str(pair[0]), str(pair[1])))
         return reg
 
     def get(self, name: str) -> WorkerSpec:
@@ -47,6 +55,10 @@ class WorkerRegistry:
 
     def all(self) -> list[WorkerSpec]:
         return list(self._workers.values())
+
+    def risk_overrides(self) -> list[tuple[str, str]]:
+        """Top-level [pattern, tier] override pairs for RiskGate (override-up only)."""
+        return list(self._risk_overrides)
 
     def add(self, spec: WorkerSpec) -> None:
         self._workers[spec.name] = spec
