@@ -45,3 +45,25 @@ def test_external_mcp_uses_risk_default_unchanged():
 def test_unknown_worker_spec_none_is_high():
     out = resolve_declared_tier(None, "low")
     assert out == ("high", "unknown_worker")
+
+
+from agent_core.workers.types import AuditEntry
+
+
+def test_audit_entry_accepts_tier_source():
+    e = AuditEntry(
+        request_id="r", worker="w", tool="t", args={},
+        declared_tier="high", effective_tier="high", outcome="ok",
+        latency_ms=1, session_guid="s", worker_contract_version=1,
+        tier_source="wire",
+    )
+    assert e.tier_source == "wire"
+
+
+def test_audit_entry_tier_source_defaults_none():
+    e = AuditEntry(
+        request_id="r", worker="w", tool="t", args={},
+        declared_tier="high", effective_tier="high", outcome="ok",
+        latency_ms=1, session_guid="s", worker_contract_version=1,
+    )
+    assert e.tier_source is None
