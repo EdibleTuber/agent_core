@@ -1,10 +1,84 @@
 # agent_core
 
-Shared library for the agent ecosystem. Provides daemon runtime, socket protocol, inference client, retrieval, wisdom, learning, channels, scratchpad, fetcher/chunker/converter, CLI REPL, and an opt-in Discord gateway adapter.
+Shared library for the agent ecosystem. Provides the daemon runtime, socket
+protocol, inference client, retrieval, wisdom, learning, channels, scratchpad,
+fetcher/chunker/converter, CLI REPL, an opt-in Discord gateway adapter, and an
+**MCP worker layer** with risk-gated tool dispatch + audit. Agents subclass
+`Agent`, implement a few handlers, and get the rest for free.
 
 ## Status
 
-Under active extraction from PAL. See `docs/superpowers/specs/2026-04-25-agent-core-extraction-design.md` in the PAL repo for the design.
+Extracted from PAL and in active use. Current line: **v1.6.0** (per-tool risk
+tiers advertised over the MCP wire). Two consumers: **PAL** (knowledge agent) and
+**PARE** (RE-lab agent). Original design:
+`docs/superpowers/specs/2026-04-25-agent-core-extraction-design.md` in the PAL repo.
+
+## Architecture
+
+An agent is a thin subclass of `Agent`. `run_daemon` wires the framework managers
+onto it, builds the tool/command registries, binds a Unix socket, and dispatches
+each incoming message to the agent's handlers. The handlers `yield` messages; the
+daemon encodes and streams them back to the client.
+
+```mermaid
+flowchart TB
+    subgraph boot["startup — run_daemon(agent)"]
+        CFG["load config"] --> MGRS["attach managers:<br/>inference · retrieval · conversation<br/>profile · wisdom · learning · channels"]
+        MGRS --> SU["agent.setup()"]
+        SU --> AR["_attach_registries:<br/>ToolExecutor + CommandRegistry<br/>(cls.tools + register_tools())"]
+        AR --> SOCK["bind unix socket"]
+    end
+    SOCK --> CONN["per connection: read NDJSON messages"]
+    CONN --> DISP{"message type?"}
+    DISP -->|"ChatMessage"| HC["agent.handle_chat"]
+    DISP -->|"CommandMessage"| HCMD["agent.handle_command"]
+    DISP -->|"ToolApprovalResponse"| RESP["resolve approval future"]
+    DISP -->|"other"| HO["agent.handle_other"]
+    HC --> RUN["_run_handler: encode + write each yielded message"]
+    HCMD --> RUN
+    RUN --> CONN
+```
+
+### Worker discovery
+
+MCP workers are declared in `workers.yaml`. At startup `discover_and_register`
+connects each worker, lists its tools (capturing per-tool risk tiers from MCP
+`_meta`), and synthesizes a `Tool` subclass per tool that dispatches back through
+the pool. An unreachable worker is logged and skipped — the agent still starts.
+
+```mermaid
+flowchart LR
+    YAML["workers.yaml"] --> REG["WorkerRegistry.load"]
+    REG --> SPECS["WorkerSpec list"]
+    SPECS --> DAR["discover_and_register(specs, pool)"]
+    DAR --> LT["per worker: pool.list_tools"]
+    LT --> MCP["MCPClientPool → stdio / streamable_http worker"]
+    MCP -->|"tool defs + _meta risk tiers"| MTC["make_tool_class"]
+    MTC --> TC["Tool subclasses"]
+    TC --> TE["ToolExecutor (LLM-facing schemas)"]
+```
+
+### Risk-gated dispatch
+
+Every worker tool call flows through `RiskAwareToolPool`. It resolves an effective
+risk tier — the **max** of the worker's `risk_default` floor, the per-tool tier
+advertised over the wire, and any operator pin in `workers.yaml` — gates
+high/critical calls on operator approval (delivered over the connection via
+`ctx.emit`), and audits every dispatch to a JSONL log.
+
+```mermaid
+flowchart TD
+    CALL["tool.run → pool.call_tool(worker, tool, args)"] --> RES["resolve_declared_tier:<br/>floor (risk_default) vs wire (_meta)"]
+    RES --> GATE["RiskGate: apply operator pins"]
+    GATE --> EFF["effective = max(floor, wire, pin)"]
+    EFF --> Q{"high or critical?"}
+    Q -->|"no"| EXEC["MCPClientPool.call_tool → worker"]
+    Q -->|"yes"| APP["ToolApprovalRegistry + ctx.emit → operator"]
+    APP -->|"approved"| EXEC
+    APP -->|"denied / timeout"| BLOCK["error result to caller"]
+    EXEC --> AUD[("AuditLog (JSONL)")]
+    BLOCK --> AUD
+```
 
 ## Installation
 
