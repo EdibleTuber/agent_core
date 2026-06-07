@@ -329,7 +329,7 @@ class Quit(Command):
     description = "End the session"
 
     async def run(self, raw_args: str, ctx) -> AsyncIterator:
-        yield ResponseMessage(text="Goodbye.")
+        yield ResponseMessage(text="Goodbye.", end_session=True)
 
 
 class Context(Command):
