@@ -142,6 +142,7 @@ async def run_repl(socket_path: Path, renderer: Renderer) -> None:
                 await conn.send(ChatMessage(text=line))
 
             # Drain responses until the daemon signals end-of-turn.
+            should_exit = False
             async for msg in conn.receive():
                 if isinstance(msg, ToolApprovalRequestMessage):
                     await handle_approval_request(
@@ -157,7 +158,11 @@ async def run_repl(socket_path: Path, renderer: Renderer) -> None:
                     print(rendered, end="", flush=True)
                 else:
                     print(rendered, flush=True)
+                if getattr(msg, "end_session", False):
+                    should_exit = True
                 if isinstance(msg, (ResponseMessage, ErrorMessage)):
                     break
+            if should_exit:
+                break
     finally:
         await conn.close()

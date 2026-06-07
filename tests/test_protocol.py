@@ -111,3 +111,14 @@ def test_encode_uses_ndjson_format():
     obj = json.loads(line[:-1])
     assert obj["type"] == "chat"
     assert obj["text"] == "hi"
+
+
+def test_response_end_session_defaults_false():
+    assert ResponseMessage(text="hi").end_session is False
+
+
+def test_response_end_session_round_trip_preserves_flag():
+    msg = ResponseMessage(text="Goodbye.", end_session=True)
+    parsed = decode_message(encode_message(msg)[:-1])
+    assert isinstance(parsed, ResponseMessage)
+    assert parsed.end_session is True

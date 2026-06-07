@@ -584,3 +584,14 @@ def test_record_usage_lazy_init_when_super_init_skipped():
     assert not hasattr(a, "last_usage")  # confirms super init was skipped
     a.record_usage("ch-1", Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2))
     assert a.last_usage["ch-1"].total_tokens == 2
+
+
+# ---------------------------------------------------------------------------
+# /quit
+# ---------------------------------------------------------------------------
+
+async def test_quit_signals_end_session():
+    msgs = await _collect(Quit().run("", _ctx(agent=None)))
+    assert len(msgs) == 1
+    assert msgs[0].text == "Goodbye."
+    assert msgs[0].end_session is True

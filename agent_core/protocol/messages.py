@@ -35,6 +35,7 @@ class ResponseMessage:
     text: str
     command: str = ""
     reasoning: str = ""
+    end_session: bool = False  # True asks an interactive client to exit its loop
     type: str = "response"
 
 
