@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.6.1] - 2026-06-18
+
+### Fixed
+- `InferenceClient` now retries transient connection drops (`httpx.RemoteProtocolError`, `NetworkError`) in both `_post_with_retry` and `_stream_with_retry`, not just HTTP 503. A keep-alive backend (e.g. the llama-manager's uvicorn, default 5s keep-alive) can close a pooled connection while the agent runs multi-second tool calls between turns; the next request reused the dead socket and raised `RemoteProtocolError: Server disconnected without sending a response`, aborting the whole turn. Timeouts are deliberately excluded (a retried 600s read timeout would compound) and 4xx still raise immediately. The streaming path only retries before the first token is yielded, so a mid-stream drop propagates rather than replaying tokens.
+
 ## [1.6.0] - 2026-05-30
 
 ### Added
