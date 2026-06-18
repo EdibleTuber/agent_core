@@ -425,3 +425,145 @@ async def test_stream_handles_missing_usage():
             end = item
     assert end is not None
     assert end.usage is None
+
+
+# ---------------------------------------------------------------------------
+# Transient connection-drop resilience.
+#
+# A model-swapping/keep-alive backend can close a pooled connection between
+# turns; the client sees httpx.RemoteProtocolError ("Server disconnected
+# without sending a response"). Such drops are transient and must be retried,
+# not surfaced as a fatal chat error. Genuine client errors (4xx) must NOT be.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_complete_retries_on_remote_protocol_error(monkeypatch):
+    """A dropped connection is retried and the next attempt succeeds."""
+    import agent_core.inference as inference
+
+    async def _no_sleep(*_a, **_k):
+        return
+    monkeypatch.setattr(inference.asyncio, "sleep", _no_sleep)
+
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response.", request=request
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        )
+
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = await client.complete(messages=[{"role": "user", "content": "hi"}])
+
+    assert result.type == "text"
+    assert result.content == "ok"
+    assert attempts["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_complete_does_not_retry_on_client_error(monkeypatch):
+    """A 4xx is a permanent error: raise immediately, do not retry."""
+    import agent_core.inference as inference
+
+    async def _no_sleep(*_a, **_k):
+        return
+    monkeypatch.setattr(inference.asyncio, "sleep", _no_sleep)
+
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        return httpx.Response(400, json={"error": "bad request"})
+
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.complete(messages=[{"role": "user", "content": "hi"}])
+    assert attempts["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_on_remote_protocol_error_before_first_chunk(monkeypatch):
+    """A connection drop before any token is retried, then streams normally."""
+    import agent_core.inference as inference
+
+    async def _no_sleep(*_a, **_k):
+        return
+    monkeypatch.setattr(inference.asyncio, "sleep", _no_sleep)
+
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response.", request=request
+            )
+        return _sse_response([
+            {"choices": [{"delta": {"content": "hi"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ])
+
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    out = []
+    async for item in client.stream(messages=[{"role": "user", "content": "hi"}]):
+        out.append(item)
+
+    assert attempts["n"] == 2
+    assert out[:-1] == ["hi"]
+    assert isinstance(out[-1], StreamEnd)
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_retry_after_first_chunk(monkeypatch):
+    """A mid-stream drop (tokens already emitted) must propagate, not retry —
+    retrying would replay already-yielded tokens to the caller."""
+    import agent_core.inference as inference
+
+    async def _no_sleep(*_a, **_k):
+        return
+    monkeypatch.setattr(inference.asyncio, "sleep", _no_sleep)
+
+    attempts = {"n": 0}
+
+    class _DropAfterFirst(httpx.AsyncByteStream):
+        def __init__(self, request):
+            self._request = request
+
+        async def __aiter__(self):
+            yield b'data: {"choices": [{"delta": {"content": "hi"}, "finish_reason": null}]}\n\n'
+            raise httpx.RemoteProtocolError("peer closed mid-stream", request=self._request)
+
+        async def aclose(self):
+            return
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_DropAfterFirst(request),
+        )
+
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    out = []
+    with pytest.raises(httpx.RemoteProtocolError):
+        async for item in client.stream(messages=[{"role": "user", "content": "hi"}]):
+            out.append(item)
+
+    assert attempts["n"] == 1
+    assert out == ["hi"]

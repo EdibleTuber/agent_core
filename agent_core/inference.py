@@ -22,6 +22,13 @@ _MAX_RETRIES = 5
 _INITIAL_BACKOFF = 2.0
 _MAX_BACKOFF = 30.0
 
+# Transient connection-level failures worth retrying: a keep-alive/model-swap
+# backend can close a pooled connection between turns (RemoteProtocolError:
+# "Server disconnected without sending a response"), or briefly refuse/reset
+# while a slot restarts (NetworkError). Timeouts are deliberately excluded — a
+# retried 600s read timeout would compound badly rather than recover.
+_RETRYABLE_CONNECTION_ERRORS = (httpx.RemoteProtocolError, httpx.NetworkError)
+
 
 class BatchUnavailableError(RuntimeError):
     """Raised when a batch-mode InferenceClient cannot reach the batch
@@ -119,17 +126,33 @@ class InferenceClient:
         backoff = _INITIAL_BACKOFF
         try:
             for attempt in range(_MAX_RETRIES):
-                async with self._client.stream("POST", url, json=payload) as resp:
-                    if resp.status_code != 503:
-                        resp.raise_for_status()
-                        yield resp
-                        return
-                    retry_after = resp.headers.get("Retry-After")
-                wait = min(float(retry_after) if retry_after else backoff, _MAX_BACKOFF)
-                logger.warning(
-                    "503 from inference server on stream (attempt %d/%d), retrying in %.1fs",
-                    attempt + 1, _MAX_RETRIES, wait,
-                )
+                yielded = False
+                try:
+                    async with self._client.stream("POST", url, json=payload) as resp:
+                        if resp.status_code != 503:
+                            resp.raise_for_status()
+                            yielded = True
+                            yield resp
+                            return
+                        retry_after = resp.headers.get("Retry-After")
+                    wait = min(float(retry_after) if retry_after else backoff, _MAX_BACKOFF)
+                    logger.warning(
+                        "503 from inference server on stream (attempt %d/%d), "
+                        "retrying in %.1fs",
+                        attempt + 1, _MAX_RETRIES, wait,
+                    )
+                except _RETRYABLE_CONNECTION_ERRORS as exc:
+                    # A drop AFTER streaming started can't be retried — that
+                    # would replay already-yielded tokens. Re-raise it (and on
+                    # the final attempt). Only pre-yield drops are retried.
+                    if yielded or attempt == _MAX_RETRIES - 1:
+                        raise
+                    wait = min(backoff, _MAX_BACKOFF)
+                    logger.warning(
+                        "connection drop from inference server on stream "
+                        "(%s, attempt %d/%d), retrying in %.1fs",
+                        type(exc).__name__, attempt + 1, _MAX_RETRIES, wait,
+                    )
                 await asyncio.sleep(wait)
                 backoff = min(backoff * 2, _MAX_BACKOFF)
             # Final attempt
@@ -152,7 +175,20 @@ class InferenceClient:
         backoff = _INITIAL_BACKOFF
         try:
             for attempt in range(_MAX_RETRIES):
-                resp = await self._client.post(url, json=payload)
+                try:
+                    resp = await self._client.post(url, json=payload)
+                except _RETRYABLE_CONNECTION_ERRORS as exc:
+                    if attempt == _MAX_RETRIES - 1:
+                        raise
+                    wait = min(backoff, _MAX_BACKOFF)
+                    logger.warning(
+                        "connection drop from inference server (%s, attempt %d/%d), "
+                        "retrying in %.1fs",
+                        type(exc).__name__, attempt + 1, _MAX_RETRIES, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    backoff = min(backoff * 2, _MAX_BACKOFF)
+                    continue
                 if resp.status_code != 503:
                     resp.raise_for_status()
                     return resp
