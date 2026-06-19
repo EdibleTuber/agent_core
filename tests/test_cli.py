@@ -138,6 +138,38 @@ async def test_run_repl_exits_on_end_session(monkeypatch, capsys):
     assert "Goodbye." in capsys.readouterr().out
 
 
+async def test_run_repl_stamps_channel_id_on_outgoing_messages(monkeypatch):
+    """Given a channel_id, run_repl tags every outgoing chat and command message
+    with it so the daemon routes to a per-launch channel instead of cli-default."""
+    conn = _FakeConn([
+        [ResponseMessage(text="ok")],
+        [ResponseMessage(text="bye", end_session=True)],
+    ])
+    prompt = _FakePrompt(["hello", "/quit"])
+    _patch_cli(monkeypatch, conn, prompt)
+
+    await cli.run_repl(
+        Path("/ignored.sock"), _NullRenderer(), channel_id="cli-20260619-120000"
+    )
+
+    chats = [m for m in conn.sent if isinstance(m, ChatMessage)]
+    cmds = [m for m in conn.sent if isinstance(m, CommandMessage)]
+    assert chats and chats[0].channel_id == "cli-20260619-120000"
+    assert cmds and cmds[0].channel_id == "cli-20260619-120000"
+
+
+async def test_run_repl_defaults_channel_id_to_none(monkeypatch):
+    """Backward compat: without a channel_id, outgoing messages carry None so the
+    daemon's existing cli-default fallback is unchanged for other callers."""
+    conn = _FakeConn([[ResponseMessage(text="bye", end_session=True)]])
+    prompt = _FakePrompt(["hi"])
+    _patch_cli(monkeypatch, conn, prompt)
+
+    await cli.run_repl(Path("/ignored.sock"), _NullRenderer())
+
+    assert conn.sent and conn.sent[0].channel_id is None
+
+
 async def test_run_repl_keeps_looping_on_normal_response(monkeypatch):
     # A normal (non-terminal) response must NOT exit the loop. Two turns:
     # a chat that replies, then an empty prompt that EOFs to end the test.

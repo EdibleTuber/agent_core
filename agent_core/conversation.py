@@ -71,7 +71,12 @@ class Conversation:
         return [{"role": "system", "content": system_prompt}] + self.messages
 
     def clear(self) -> None:
+        """Reset the conversation: empty the in-memory window AND truncate the
+        on-disk log, so a cleared conversation does not resurrect via replay on
+        the next daemon restart. No-op on disk when history_path is unset."""
         self._messages.clear()
+        if self.history_path is not None and self.history_path.exists():
+            self.history_path.write_text("", encoding="utf-8")
 
     def _truncate(self) -> None:
         if len(self._messages) > self.history_depth:

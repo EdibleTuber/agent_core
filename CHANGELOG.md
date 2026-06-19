@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.6.2] - 2026-06-19
+
+### Added
+- `run_repl(socket_path, renderer, channel_id=None)` — the CLI REPL now accepts an optional `channel_id` and stamps it on every outgoing `ChatMessage`/`CommandMessage`, letting an agent's launcher route a CLI session to a dedicated channel instead of the daemon's shared `cli-default` fallback. Default `None` preserves prior behavior (no `channel_id` sent) for all existing callers, so PAL and other consumers are unaffected.
+
+### Fixed
+- `Conversation.clear()` now also truncates the on-disk `history.jsonl` (when `history_path` is set), not just the in-memory window. Previously `/clear` emptied memory but left the JSONL intact, so the "cleared" conversation resurrected via replay on the next daemon restart. No-op on disk for in-memory-only conversations.
+
 ## [1.6.1] - 2026-06-18
 
 ### Fixed
