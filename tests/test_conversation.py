@@ -99,6 +99,31 @@ def test_clear():
     assert conv.messages == []
 
 
+def test_clear_truncates_history_file(tmp_path):
+    """clear() must empty the on-disk log too, otherwise a 'cleared' conversation
+    resurrects via replay on the next daemon restart (the /clear split-brain bug)."""
+    history_path = tmp_path / "history.jsonl"
+    conv = Conversation(history_depth=10, history_path=history_path)
+    conv.add_user("secret context")
+    conv.add_assistant("ok")
+    assert history_path.read_text().strip()  # precondition: file has content
+
+    conv.clear()
+
+    assert conv.messages == []
+    assert history_path.read_text() == ""
+
+
+def test_clear_without_history_path_is_a_noop_on_disk(tmp_path):
+    """Backward compat: clear() on an in-memory-only conversation must not error
+    or create a file."""
+    conv = Conversation(history_depth=10)
+    conv.add_user("hello")
+    conv.clear()
+    assert conv.messages == []
+    assert not list(tmp_path.iterdir())
+
+
 def test_overrides_default_empty():
     conv = Conversation(history_depth=10)
     assert conv.overrides == {}
