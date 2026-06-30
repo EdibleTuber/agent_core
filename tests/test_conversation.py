@@ -92,6 +92,32 @@ def test_truncation_drops_orphaned_tool_messages():
         assert not (first.get("role") == "assistant" and first.get("tool_calls"))
 
 
+def test_tool_heavy_turn_does_not_evict_user_anchor():
+    """A single turn with more tool exchanges than history_depth must keep its
+    anchoring user message instead of collapsing the in-memory window.
+
+    Regression for the amnesia bug: when the [-depth:] slice contained only
+    assistant(tool_calls)/tool messages, the orphan-popping loop drained the
+    whole window to []. get_messages_for_api then returned just the system
+    prompt, so the model cold-started and greeted mid-task, and the next turn
+    had no record of any tool calls.
+    """
+    conv = Conversation(history_depth=4)
+    conv.add_user("enumerate everything")
+    # 3 tool-call/result pairs = 6 messages; total 7 >> depth 4. Every message
+    # after the user turn is a poppable orphan if sliced naively.
+    for i in range(3):
+        conv.add_assistant_tool_calls([{
+            "id": f"call_{i}",
+            "type": "function",
+            "function": {"name": "enumerate", "arguments": "{}"},
+        }])
+        conv.add_tool_result(f"call_{i}", f"result {i}")
+
+    assert conv.messages, "in-memory window collapsed to empty"
+    assert conv.messages[0] == {"role": "user", "content": "enumerate everything"}
+
+
 def test_clear():
     conv = Conversation(history_depth=10)
     conv.add_user("hello")
