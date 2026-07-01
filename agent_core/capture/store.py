@@ -113,7 +113,7 @@ class CaptureStore:
 
     def search(self, *, text: str = "", worker: str = "", field: str = "",
                contains: str = "", limit: int = 50) -> list[dict]:
-        from agent_core.capture.query import fts_phrase, _ALLOWED_FIELDS
+        from agent_core.capture.query import fts_phrase, _ALLOWED_FIELDS, _COL_MAP
         clauses, params = [], []
         sql = "SELECT c.* FROM captures c"
         if text:
@@ -125,7 +125,7 @@ class CaptureStore:
             params.append(worker)
         if field and contains:
             if field in _ALLOWED_FIELDS:
-                clauses.append(f"c.{field} LIKE ? ESCAPE '\\'")
+                clauses.append(f"{_COL_MAP[field]} LIKE ? ESCAPE '\\'")
             else:
                 clauses.append("json_extract(c.body, ?) LIKE ? ESCAPE '\\'")
                 params.append("$." + field)

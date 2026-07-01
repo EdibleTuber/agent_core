@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-_ALLOWED_FIELDS = frozenset({"worker", "tool", "session_id"})
+_COL_MAP = {"worker": "c.worker", "tool": "c.tool", "session_id": "c.session_id"}
+_ALLOWED_FIELDS = frozenset(_COL_MAP)
 
 
 def fts_phrase(text: str) -> str:
