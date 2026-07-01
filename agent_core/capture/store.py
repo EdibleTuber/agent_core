@@ -111,5 +111,38 @@ class CaptureStore:
             d["body"] = Path(d["blob_ref"]).read_text(encoding="utf-8")
         return d
 
+    def search(self, *, text: str = "", worker: str = "", field: str = "",
+               contains: str = "", limit: int = 50) -> list[dict]:
+        from agent_core.capture.query import fts_phrase, _ALLOWED_FIELDS
+        clauses, params = [], []
+        sql = "SELECT c.* FROM captures c"
+        if text:
+            sql += " JOIN captures_fts f ON f.rowid = c.seq"
+            clauses.append("captures_fts MATCH ?")
+            params.append(fts_phrase(text))
+        if worker:
+            clauses.append("c.worker = ?")
+            params.append(worker)
+        if field and contains:
+            if field in _ALLOWED_FIELDS:
+                clauses.append(f"c.{field} LIKE ? ESCAPE '\\'")
+            else:
+                clauses.append("json_extract(c.body, ?) LIKE ? ESCAPE '\\'")
+                params.append("$." + field)
+            like = "%" + contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            params.append(like)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY c.seq DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    def recent(self, limit: int = 20) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT ref, worker, tool, rows, summary FROM captures ORDER BY seq DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def close(self) -> None:
         self._conn.close()
