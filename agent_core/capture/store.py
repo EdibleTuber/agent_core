@@ -184,12 +184,20 @@ class CaptureStore:
                     removed += 1
         if max_bytes is not None:
             while self.total_bytes() > max_bytes:
-                row = self._conn.execute(
-                    "SELECT ref FROM captures ORDER BY seq ASC LIMIT 1").fetchone()
-                if row is None or row["ref"] in protected_refs:
-                    break
-                if self.delete(row["ref"]):
-                    removed += 1
+                if protected_refs:
+                    placeholders = ",".join("?" * len(protected_refs))
+                    row = self._conn.execute(
+                        f"SELECT ref FROM captures WHERE ref NOT IN ({placeholders})"
+                        " ORDER BY seq ASC LIMIT 1",
+                        list(protected_refs),
+                    ).fetchone()
                 else:
+                    row = self._conn.execute(
+                        "SELECT ref FROM captures ORDER BY seq ASC LIMIT 1"
+                    ).fetchone()
+                if row is None:
                     break
+                if not self.delete(row["ref"]):
+                    break
+                removed += 1
         return removed
