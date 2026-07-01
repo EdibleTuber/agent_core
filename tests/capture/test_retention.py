@@ -28,3 +28,20 @@ def test_purge_by_age_respects_protected_refs(tmp_path):
     assert store.get(old) is None
     assert store.get(keep) is not None
     store.close()
+
+
+def test_purge_by_size_skips_protected_oldest(tmp_path):
+    store = CaptureStore.open(tmp_path / ".pare" / "capture.db")
+    protected = store.write(_big())   # seq 1, oldest
+    evictable = store.write(_big())   # seq 2
+    removed = store.purge(max_bytes=0, now=0, protected_refs={protected})
+    assert removed == 1
+    assert store.get(protected) is not None
+    assert store.get(evictable) is None
+    store.close()
+
+
+def test_delete_unknown_ref_returns_false(tmp_path):
+    store = CaptureStore.open(tmp_path / ".pare" / "capture.db")
+    assert store.delete("nonexistent") is False
+    store.close()
