@@ -146,3 +146,50 @@ class CaptureStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def _unlink_blob(self, blob_ref: str | None) -> None:
+        if blob_ref:
+            Path(blob_ref).unlink(missing_ok=True)
+
+    def delete(self, ref: str) -> bool:
+        row = self._conn.execute("SELECT seq, blob_ref FROM captures WHERE ref=?", (ref,)).fetchone()
+        if row is None:
+            return False
+        self._conn.execute("DELETE FROM captures WHERE seq=?", (row["seq"],))
+        self._conn.execute("INSERT INTO captures_fts(captures_fts) VALUES ('rebuild')")
+        self._conn.commit()
+        self._unlink_blob(row["blob_ref"])  # after commit: a crash orphans a file, never a row
+        return True
+
+    def total_bytes(self) -> int:
+        rows = self._conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(body)), 0) AS b FROM captures"
+        ).fetchone()["b"]
+        blob_total = 0
+        for r in self._conn.execute("SELECT blob_ref FROM captures WHERE blob_ref IS NOT NULL"):
+            p = Path(r["blob_ref"])
+            if p.exists():
+                blob_total += p.stat().st_size
+        return int(rows) + blob_total
+
+    def purge(self, *, max_bytes: int | None = None, max_age_s: float | None = None,
+              now: float, protected_refs: set[str] = frozenset()) -> int:
+        removed = 0
+        if max_age_s is not None:
+            cutoff = now - max_age_s
+            stale = [r["ref"] for r in self._conn.execute(
+                "SELECT ref FROM captures WHERE ts < ? ORDER BY seq ASC", (cutoff,))]
+            for ref in stale:
+                if ref not in protected_refs and self.delete(ref):
+                    removed += 1
+        if max_bytes is not None:
+            while self.total_bytes() > max_bytes:
+                row = self._conn.execute(
+                    "SELECT ref FROM captures ORDER BY seq ASC LIMIT 1").fetchone()
+                if row is None or row["ref"] in protected_refs:
+                    break
+                if self.delete(row["ref"]):
+                    removed += 1
+                else:
+                    break
+        return removed
