@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import secrets
 import sqlite3
 import time
@@ -85,6 +84,7 @@ class CaptureStore:
         if spill:
             blobs = self._root / "blobs"
             blobs.mkdir(exist_ok=True, mode=0o700)
+            blobs.chmod(0o700)
             blob_path = blobs / f"{seq}.bin"
             try:
                 blob_path.write_bytes(record.body.encode("utf-8"))
