@@ -47,3 +47,11 @@ async def test_search_capture_recent_mode_on_empty_args():
     out = await SearchCapture().run({}, _Ctx(_Agent(store)))
     doc = json.loads(out)
     assert any(r["ref"] == ref for r in doc["recent"])
+
+
+@pytest.mark.asyncio
+async def test_read_capture_absent_ref_returns_sentinel():
+    store, _ = _store_with_row()
+    out = await ReadCapture().run({}, _Ctx(_Agent(store)))
+    doc = json.loads(out)
+    assert doc["expired"] is True
