@@ -69,7 +69,7 @@ class CaptureStore:
         return cls(conn, None, blob_threshold=1 << 30)
 
     def write(self, record: CaptureRecord) -> str:
-        ref = secrets.token_hex(4)
+        ref = secrets.token_hex(8)
         addrs_text = " ".join(record.addrs)
         spill = len(record.body) > self._blob_threshold and self._root is not None
         stored_body = None if spill else record.body
@@ -152,13 +152,21 @@ class CaptureStore:
             Path(blob_ref).unlink(missing_ok=True)
 
     def delete(self, ref: str) -> bool:
-        row = self._conn.execute("SELECT seq, blob_ref FROM captures WHERE ref=?", (ref,)).fetchone()
-        if row is None:
+        full = self.get(ref)  # restores body from blob if spilled; carries seq/addrs/blob_ref
+        if full is None:
             return False
-        self._conn.execute("DELETE FROM captures WHERE seq=?", (row["seq"],))
-        self._conn.execute("INSERT INTO captures_fts(captures_fts) VALUES ('rebuild')")
+        seq = full["seq"]
+        # External-content FTS5: remove this row's tokens using its ORIGINAL indexed
+        # values. 'rebuild' would re-read the content table, where spilled rows have
+        # body=NULL, silently dropping their tokens — breaking text search on exactly
+        # the large captures spill was meant to preserve.
+        self._conn.execute(
+            "INSERT INTO captures_fts(captures_fts, rowid, body, addrs) VALUES('delete', ?, ?, ?)",
+            (seq, full["body"] or "", full["addrs"] or ""),
+        )
+        self._conn.execute("DELETE FROM captures WHERE seq=?", (seq,))
         self._conn.commit()
-        self._unlink_blob(row["blob_ref"])  # after commit: a crash orphans a file, never a row
+        self._unlink_blob(full["blob_ref"])
         return True
 
     def total_bytes(self) -> int:

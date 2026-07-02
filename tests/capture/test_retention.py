@@ -45,3 +45,18 @@ def test_delete_unknown_ref_returns_false(tmp_path):
     store = CaptureStore.open(tmp_path / ".pare" / "capture.db")
     assert store.delete("nonexistent") is False
     store.close()
+
+
+def test_text_search_survives_delete_of_other_spilled_row(tmp_path):
+    store = CaptureStore.open(tmp_path / ".pare" / "capture.db")
+    # A spilled (>64KB) row carrying a known searchable token.
+    keep = store.write(CaptureRecord(
+        worker="frida", tool="read_memory", session_id="s1", launch_ts=1.0,
+        summary="big", body=json.dumps([{"tag": "UNIQUETOKEN_KEEP", "pad": "a" * 70000}]),
+        rows=1, addrs=[]))
+    other = store.write(_big())  # unrelated spilled row
+    assert len(store.search(text="UNIQUETOKEN_KEEP")) == 1
+    store.delete(other)
+    # The rebuild bug would drop the spilled row's tokens here -> 0 hits.
+    assert len(store.search(text="UNIQUETOKEN_KEEP")) == 1
+    store.close()
