@@ -10,7 +10,10 @@ from __future__ import annotations
 import copy
 import time
 import uuid
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from agent_core.capture.layer import CaptureLayer
 
 from agent_core.workers.audit import AuditLog
 from agent_core.workers.client_pool import MCPClientPool
@@ -46,6 +49,7 @@ class RiskAwareToolPool:
         approval_registry: ToolApprovalRegistry,
         audit_log: AuditLog,
         send_message: SendMessage | None = None,
+        capture_layer: "CaptureLayer | None" = None,
     ) -> None:
         self._inner = inner
         self._specs = specs
@@ -53,6 +57,7 @@ class RiskAwareToolPool:
         self._registry = approval_registry
         self._audit = audit_log
         self._send = send_message
+        self._capture = capture_layer
         self._session_approved: set[tuple[str, str]] = set()
         self._tool_tiers: dict[tuple[str, str], str | None] = {}
 
@@ -74,7 +79,8 @@ class RiskAwareToolPool:
         await self._inner.close_all()
 
     # --- gated dispatch --------------------------------------------------
-    async def call_tool(self, worker: str, tool: str, arguments: dict[str, Any], ctx: Any = None):
+    async def call_tool(self, worker: str, tool: str, arguments: dict[str, Any], ctx: Any = None,
+                        capture: bool = True):
         snapshot = copy.deepcopy(arguments) if isinstance(arguments, dict) else {}
         spec = self._specs.get(worker)
         # A tool we never saw in discovery is treated as "no advertised tier"
@@ -98,10 +104,15 @@ class RiskAwareToolPool:
                 if blocked is not None:  # denied / undeliverable / timeout
                     return blocked
 
-        return await self._execute_and_audit(
+        result = await self._execute_and_audit(
             worker, tool, arguments, snapshot, declared, effective, gate_override,
             session_note, tier_source,
         )
+        if self._capture is not None and not getattr(result, "isError", False):
+            session_id = arguments.get("session_id") if isinstance(arguments, dict) else None
+            return self._capture.maybe_substitute(worker, tool, result, substitute=capture,
+                                                  session_id=session_id)
+        return result
 
     def _resolve_send(self, ctx):
         """Prefer the per-request connection channel (ctx.emit); fall back to a
