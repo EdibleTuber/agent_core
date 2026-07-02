@@ -31,6 +31,7 @@ class BaseConfig:
     model: str = "Qwen3.5-35B-A3B-Q4_K_M"
     socket_path: Path | None = None
     history_depth: int = 50
+    context_window_tokens: int = 32768
     vault_path: Path = field(default_factory=lambda: Path.home() / "vault")
     collection_id: str = "vault"
     username: str = "user"
