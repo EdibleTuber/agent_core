@@ -35,5 +35,7 @@ def build_stub(*, worker: str, ref: str, rows: int, summary: str, body_bytes: in
     blob = json.dumps(doc)
     if len(blob.encode("utf-8")) <= max_bytes:
         return blob
-    return json.dumps({"captured": {"worker": worker, "ref": ref, "rows": rows},
-                       "hint": f'read_capture(ref="{ref}")'})
+    safe_ref = _clip(ref, max_bytes // 4)
+    safe_worker = _clip(worker, 40)
+    return json.dumps({"captured": {"worker": safe_worker, "ref": safe_ref, "rows": rows},
+                       "hint": f'read_capture(ref="{safe_ref}")'})
