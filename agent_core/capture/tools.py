@@ -18,7 +18,7 @@ class SearchCapture(Tool):
         "properties": {
             "text": {"type": "string", "description": "full-text query"},
             "worker": {"type": "string", "description": "optional worker filter (frida/ghidra/...)"},
-            "field": {"type": "string", "description": "dotted json path to filter on"},
+            "field": {"type": "string", "description": "dotted json path to filter on; matches object-shaped captures — for array/rows captures use text= full-text search instead"},
             "contains": {"type": "string", "description": "substring the field must contain"},
             "limit": {"type": "integer", "description": "max results (default 50; recent mode caps at 20)"},
         },
