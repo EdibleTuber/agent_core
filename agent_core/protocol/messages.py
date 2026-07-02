@@ -10,6 +10,7 @@ from agent_core.protocol.transport import register_message
 class ChatMessage:
     text: str
     channel_id: str | None = None
+    cwd: str | None = None
     type: str = "chat"
 
 
@@ -19,6 +20,7 @@ class CommandMessage:
     name: str
     args: str
     channel_id: str | None = None
+    cwd: str | None = None
     type: str = "command"
 
 
