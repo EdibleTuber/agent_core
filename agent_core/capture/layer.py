@@ -49,7 +49,7 @@ class CaptureLayer:
             return result
         ref = self.store.write(CaptureRecord(
             worker=worker, tool=tool, session_id=session_id, launch_ts=self._launch_ts,
-            summary=f"{tool}: {len(rows)} row(s)", body=text if isinstance(text, str) else json.dumps(value),
+            summary=f"{tool}: {len(rows)} row(s)", body=text,
             rows=len(rows), addrs=normalize_addrs(text),
         ))
         if not substitute or body_bytes <= self._budget:

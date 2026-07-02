@@ -1,5 +1,4 @@
 import json
-import pytest
 from agent_core.capture.store import CaptureStore
 from agent_core.capture.layer import CaptureLayer, stringify_result
 
@@ -22,6 +21,7 @@ def test_small_result_passes_through_unsubstituted():
     r = _Result(json.dumps([{"a": 1}]))
     out = layer.maybe_substitute("frida", "t", r, substitute=True)
     assert out is r  # under budget -> model sees it verbatim
+    assert len(layer.store.recent()) == 1  # small arrays are still stored
 
 
 def test_oversized_result_is_substituted_with_bounded_stub():
