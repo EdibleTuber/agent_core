@@ -20,7 +20,7 @@ class SearchCapture(Tool):
             "worker": {"type": "string", "description": "optional worker filter (frida/ghidra/...)"},
             "field": {"type": "string", "description": "dotted json path to filter on"},
             "contains": {"type": "string", "description": "substring the field must contain"},
-            "limit": {"type": "integer"},
+            "limit": {"type": "integer", "description": "max results (default 50; recent mode caps at 20)"},
         },
     }
     requires = ("capture_store",)
@@ -59,7 +59,7 @@ class ReadCapture(Tool):
 
     async def run(self, args: dict, ctx: Any) -> str:
         store = ctx.agent.capture_store
-        ref = args.get("ref", "")
+        ref = args.get("ref") or ""
         row = store.get(ref)
         if row is None:
             return json.dumps({"expired": True,
