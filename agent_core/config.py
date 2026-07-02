@@ -42,6 +42,7 @@ class BaseConfig:
     batch_inference_url: str = "http://192.168.1.14:11434"
     batch_model: str = "Qwen3.5-35B-A3B-Q4_K_M"
     scratchpad_max_bytes: int = 2048
+    project_marker: str | None = None
 
 
 def _coerce(field_type, raw: str):
