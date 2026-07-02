@@ -23,7 +23,8 @@ def test_marker_none_means_no_project(tmp_path):
     db, is_project = resolve_capture_db(tmp_path, None, home=tmp_path,
                                         xdg_state=tmp_path / "state", channel_id="c1")
     assert is_project is False
-    assert (tmp_path / "state") in db.parents
+    assert db.name == "c1.db"          # fallback db is keyed by channel_id
+    assert db.parent.name == "captures"
 
 
 def test_home_ceiling_is_not_a_project(tmp_path):

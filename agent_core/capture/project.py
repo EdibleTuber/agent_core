@@ -8,7 +8,7 @@ def resolve_capture_db(cwd: Path, marker: str | None, *, home: Path, xdg_state: 
     """Resolve the capture db path. Walk up from cwd for `marker`, stopping
     before $HOME (a marker exactly at $HOME is ignored). Fall back to a
     per-launch path under xdg_state keyed by channel_id."""
-    if marker:
+    if marker is not None:
         cwd = Path(cwd).resolve()
         home = Path(home).resolve()
         for d in [cwd, *cwd.parents]:
@@ -16,5 +16,5 @@ def resolve_capture_db(cwd: Path, marker: str | None, *, home: Path, xdg_state: 
                 break
             if (d / marker).is_dir():
                 return d / marker / "capture.db", True
-    fallback = Path(xdg_state) / "captures" / f"{channel_id}.db"
+    fallback = Path(xdg_state).resolve() / "captures" / f"{channel_id}.db"
     return fallback, False
