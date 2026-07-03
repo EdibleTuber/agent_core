@@ -91,6 +91,7 @@ class Daemon:
                     writer=writer,
                     agent=self.agent,
                     emit=_emit,
+                    cwd=getattr(msg, "cwd", None),
                 )
 
                 if isinstance(msg, ChatMessage):
