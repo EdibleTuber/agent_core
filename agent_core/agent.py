@@ -42,6 +42,7 @@ class HandlerContext:
     writer: object          # asyncio.StreamWriter; framework-internal
     agent: object = None    # Agent; populated by Daemon._handle_connection
     emit: object = None     # Callable[[object], Awaitable[None]]; populated by Daemon
+    cwd: str | None = None  # operator's launch cwd, stamped by the CLI; None for non-CLI clients
 
 
 class Agent:
