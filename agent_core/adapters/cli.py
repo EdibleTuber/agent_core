@@ -116,14 +116,18 @@ def _default_format(msg: object) -> str:
 
 
 async def run_repl(
-    socket_path: Path, renderer: Renderer, channel_id: str | None = None
+    socket_path: Path, renderer: Renderer, channel_id: str | None = None,
+    cwd: str | None = None,
 ) -> None:
     """Connect, run the input loop, render messages until the user exits.
 
     When `channel_id` is set, every outgoing chat/command message is tagged with
     it so the daemon routes this session to a dedicated channel. Left as None,
     messages carry no channel_id and the daemon applies its `cli-default`
-    fallback (unchanged behavior for existing callers)."""
+    fallback (unchanged behavior for existing callers).
+
+    When `cwd` is set, it is stamped on every outgoing ChatMessage and
+    CommandMessage so the daemon can resolve a per-project store."""
     print(renderer.splash())
     conn = DaemonConnection(socket_path)
     await conn.connect()
@@ -144,9 +148,9 @@ async def run_repl(
                 parts = line[1:].split(None, 1)
                 name = parts[0]
                 args = parts[1] if len(parts) > 1 else ""
-                await conn.send(CommandMessage(name=name, args=args, channel_id=channel_id))
+                await conn.send(CommandMessage(name=name, args=args, channel_id=channel_id, cwd=cwd))
             else:
-                await conn.send(ChatMessage(text=line, channel_id=channel_id))
+                await conn.send(ChatMessage(text=line, channel_id=channel_id, cwd=cwd))
 
             # Drain responses until the daemon signals end-of-turn.
             should_exit = False
