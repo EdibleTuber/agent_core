@@ -115,6 +115,36 @@ def _default_format(msg: object) -> str:
     return f"[unrendered {type(msg).__name__}]"
 
 
+class _TurnPrinter:
+    """Decides what to print for each message in a single turn, so a streamed
+    turn's text is not rendered twice.
+
+    A reasoning=off turn streams StreamChunkMessage tokens (printed live, no
+    newline) and then emits a ResponseMessage carrying the same joined text. We
+    print the streamed tokens, then when the closing ResponseMessage merely
+    repeats them we emit only the newline that terminates the streamed line.
+    A ResponseMessage that was NOT preceded by streaming (reasoning=on), or one
+    whose text diverges from the stream, is printed in full — so no output is
+    ever lost. Construct a fresh instance per turn."""
+
+    def __init__(self, renderer: "Renderer") -> None:
+        self._renderer = renderer
+        self._streamed: list[str] = []
+
+    def emit(self, msg: object) -> tuple[str, str]:
+        """Return (text, end) for a single print() call."""
+        rendered = self._renderer.format_message(msg)
+        if rendered is None:
+            rendered = _default_format(msg)
+        if isinstance(msg, StreamChunkMessage):
+            self._streamed.append(rendered)
+            return (rendered, "")
+        if isinstance(msg, ResponseMessage) and self._streamed:
+            if rendered == "".join(self._streamed):
+                return ("", "\n")   # duplicate of the stream: just close the line
+        return (rendered, "\n")
+
+
 async def run_repl(
     socket_path: Path, renderer: Renderer, channel_id: str | None = None,
     cwd: str | None = None,
@@ -152,8 +182,11 @@ async def run_repl(
             else:
                 await conn.send(ChatMessage(text=line, channel_id=channel_id, cwd=cwd))
 
-            # Drain responses until the daemon signals end-of-turn.
+            # Drain responses until the daemon signals end-of-turn. A fresh
+            # _TurnPrinter per turn suppresses a final ResponseMessage that just
+            # repeats streamed chunks (avoids double-rendering the answer).
             should_exit = False
+            printer = _TurnPrinter(renderer)
             async for msg in conn.receive():
                 if isinstance(msg, ToolApprovalRequestMessage):
                     await handle_approval_request(
@@ -162,13 +195,8 @@ async def run_repl(
                         send_fn=conn.send,
                     )
                     continue
-                rendered = renderer.format_message(msg)
-                if rendered is None:
-                    rendered = _default_format(msg)
-                if isinstance(msg, StreamChunkMessage):
-                    print(rendered, end="", flush=True)
-                else:
-                    print(rendered, flush=True)
+                text, end = printer.emit(msg)
+                print(text, end=end, flush=True)
                 if getattr(msg, "end_session", False):
                     should_exit = True
                 if isinstance(msg, (ResponseMessage, ErrorMessage)):
