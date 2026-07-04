@@ -9,10 +9,16 @@ _HEX = re.compile(r"\b(?:0x)?([0-9a-fA-F]{4,16})\b")
 def infer_rows(value: Any) -> list[dict]:
     """Map a JSON value to rows per spec §4, with guard rules."""
     if isinstance(value, dict):
-        # Single-array-value object -> unwrap to that array's rows.
-        vals = list(value.values())
-        if len(vals) == 1 and isinstance(vals[0], list):
-            return infer_rows(vals[0])
+        # Annotated-list object -> unwrap to that list's rows. Applies when the
+        # object has exactly one list-valued value and every remaining value is
+        # a scalar (e.g. a worker envelope {"summary": "2 processes",
+        # "processes": [...]}): the list is the rows, the scalars are
+        # annotations. A dict-valued sibling means this is a genuine multi-field
+        # record, so keep it as a single row.
+        list_vals = [v for v in value.values() if isinstance(v, list)]
+        nonlist = [v for v in value.values() if not isinstance(v, list)]
+        if len(list_vals) == 1 and all(not isinstance(v, dict) for v in nonlist):
+            return infer_rows(list_vals[0])
         return [value]
     if isinstance(value, list):
         out = []
@@ -44,5 +50,9 @@ def normalize_addrs(body: str) -> list[str]:
 
 def is_substantial(value: Any, rows: list[dict], serialized_bytes: int, inline_budget: int) -> bool:
     if isinstance(value, list) and rows:
+        return True
+    if len(rows) > 1:
+        # A multi-row result (incl. an unwrapped annotated-list envelope) is
+        # worth storing even when small, so it can be searched / re-viewed.
         return True
     return serialized_bytes > inline_budget
