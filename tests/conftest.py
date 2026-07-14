@@ -272,6 +272,27 @@ async def mock_list_models(request: Request):
     })
 
 
+async def mock_manager_status(request: Request):
+    """Mock GET /status (llama-manager slot state)."""
+    return JSONResponse({
+        "slots": {
+            "main": {"loaded_model": "test-model", "healthy": True},
+            "batch": {"loaded_model": "gemma-4-E4B-it-Q4_K_M", "healthy": True},
+        },
+        "gpu": {"name": "mock", "vram_total_mb": 24000, "vram_used_mb": 12000},
+    })
+
+
+async def mock_manager_swap(request: Request):
+    """Mock POST /swap (llama-manager model swap)."""
+    body = await request.json()
+    return JSONResponse({
+        "slot": body.get("target", "main"),
+        "model": body.get("model"),
+        "status": "ok",
+    })
+
+
 async def mock_collection_search(request: Request):
     """Mock POST /collections/{collection_id}/search endpoint."""
     body = await request.json()
@@ -352,6 +373,8 @@ mock_app = Starlette(routes=[
     Route("/page-with-code.html", mock_page_with_code, methods=["GET"]),
     Route("/v1/chat/completions", mock_chat_completions, methods=["POST"]),
     Route("/v1/models", mock_list_models, methods=["GET"]),
+    Route("/status", mock_manager_status, methods=["GET"]),
+    Route("/swap", mock_manager_swap, methods=["POST"]),
     Route("/collections/{collection_id}/search", mock_collection_search, methods=["POST"]),
     Route("/collections/{collection_id}/docs/{doc_id:path}", mock_collection_get_doc, methods=["GET"]),
     Route("/search", mock_searxng_search, methods=["GET"]),
