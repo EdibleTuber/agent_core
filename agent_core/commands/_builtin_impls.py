@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from agent_core.commands.base import Command
-from agent_core.protocol.messages import ResponseMessage
+from agent_core.protocol.messages import ErrorMessage, ResponseMessage
 from agent_core.scratchpad import Scratchpad, ScratchpadTooLarge
 
 
@@ -261,19 +261,108 @@ class Rate(Command):
 
 class Model(Command):
     name = "model"
-    args = "[<name>]"
-    description = "Show or switch the active model"
+    args = "[list | default | [--target main|batch] <name>]"
+    description = "Show, list, or switch the active model (swaps on the inference manager)"
     requires = ("inference",)
 
     async def run(self, raw_args: str, ctx) -> AsyncIterator:
-        target = raw_args.strip()
-        if not target:
-            # InferenceClient stores active model as .default_model, not .model
-            current = getattr(ctx.agent.inference, "default_model", "?")
-            yield ResponseMessage(text=f"model: {current}")
+        import httpx
+
+        arg = raw_args.strip()
+        inf = ctx.agent.inference
+        base = inf.base_url
+
+        # --- no arg: show what each slot has loaded + what the session sends ---
+        if not arg:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(f"{base}/status")
+                    resp.raise_for_status()
+                slots = resp.json().get("slots", {})
+            except Exception:
+                # Plain OpenAI endpoint with no /status: fall back to the pointer.
+                yield ResponseMessage(text=f"model: {inf.default_model}", command="model")
+                return
+            lines = ["Loaded models:"]
+            for slot_name in ("main", "batch"):
+                s = slots.get(slot_name)
+                if s is not None:
+                    health = "healthy" if s.get("healthy") else "UNHEALTHY"
+                    lines.append(f"  {slot_name}: {s.get('loaded_model', '?')} ({health})")
+            lines.append(f"session sends: {inf.default_model}")
+            yield ResponseMessage(text="\n".join(lines), command="model")
             return
-        ctx.agent.inference.default_model = target
-        yield ResponseMessage(text=f"model: {target}")
+
+        # --- list: available GGUFs on the manager ---
+        if arg == "list":
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    resp = await client.get(f"{base}/v1/models")
+                    resp.raise_for_status()
+                names = [m["id"] for m in resp.json().get("data", [])]
+            except Exception as exc:
+                yield ErrorMessage(error=f"Could not reach inference manager: {exc}")
+                return
+            if not names:
+                yield ResponseMessage(text="No models available.", command="model")
+                return
+            lines = ["Available models:"]
+            for i, name in enumerate(names, 1):
+                marker = " (session)" if name == inf.default_model else ""
+                lines.append(f"  {i}. {name}{marker}")
+            yield ResponseMessage(text="\n".join(lines), command="model")
+            return
+
+        # --- default: repoint the session at the config default (no swap) ---
+        if arg == "default":
+            default = getattr(getattr(ctx.agent, "config", None), "model", None)
+            if not default:
+                yield ErrorMessage(error="No config default model available.")
+                return
+            inf.default_model = default
+            yield ResponseMessage(
+                text=f"model: session reset to config default: {default} "
+                     "(not swapped on manager)",
+                command="model",
+            )
+            return
+
+        # --- swap: [--target main|batch] <name> ---
+        target = "main"
+        parts = arg.split()
+        if parts[0] == "--target":
+            if len(parts) < 3:
+                yield ResponseMessage(
+                    text="Usage: /model [--target main|batch] <name>", command="model")
+                return
+            target = parts[1]
+            name = " ".join(parts[2:])
+            if target not in ("main", "batch"):
+                yield ResponseMessage(
+                    text=f"Unknown target: {target}. Use main or batch.", command="model")
+                return
+        else:
+            name = arg
+
+        # Load it on the manager (POST /swap). A cold swap restarts llama-server,
+        # so allow the manager's swap timeout to elapse.
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                resp = await client.post(f"{base}/swap", json={"model": name, "target": target})
+                resp.raise_for_status()
+        except Exception as exc:
+            yield ErrorMessage(error=f"Swap failed ({target} -> {name}): {exc}")
+            return
+
+        # Repoint the session so the NEXT turn uses the model we just loaded.
+        # The local-only builtin never did this, and PAL's override swaps without
+        # repointing — doing both here is what makes /model a one-step switch.
+        if target == "main":
+            inf.default_model = name
+        yield ResponseMessage(
+            text=f"model: {target} -> {name} (loaded on manager + session repointed)",
+            command="model",
+        )
 
 
 class Think(Command):

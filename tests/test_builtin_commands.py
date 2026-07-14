@@ -357,22 +357,69 @@ async def test_rate_no_args():
 # /model
 # ---------------------------------------------------------------------------
 
-async def test_model_show():
-    # InferenceClient stores model as .default_model, not .model
-    inf = MagicMock(default_model="model-a")
+async def test_model_show_reports_loaded_slots(mock_inference_server):
+    # No arg -> GET /status -> report each slot's loaded model + session pointer.
+    inf = MagicMock(default_model="test-model", base_url=mock_inference_server)
     agent = MagicMock(inference=inf)
     msgs = await _collect(Model().run("", _ctx(agent)))
     body = _body(msgs)
-    assert "model-a" in body
+    assert "main:" in body
+    assert "session sends: test-model" in body
 
 
-async def test_model_switch():
-    inf = MagicMock(default_model="old-model")
+async def test_model_show_falls_back_without_status():
+    # A plain OpenAI endpoint (no reachable /status) falls back to the pointer.
+    inf = MagicMock(default_model="model-a", base_url="http://127.0.0.1:1")
+    agent = MagicMock(inference=inf)
+    msgs = await _collect(Model().run("", _ctx(agent)))
+    assert "model-a" in _body(msgs)
+
+
+async def test_model_switch_swaps_and_repoints(mock_inference_server):
+    # <name> -> POST /swap succeeds -> session repointed to the loaded model.
+    inf = MagicMock(default_model="old-model", base_url=mock_inference_server)
     agent = MagicMock(inference=inf)
     msgs = await _collect(Model().run("new-model-x", _ctx(agent)))
-    assert inf.default_model == "new-model-x"
+    assert inf.default_model == "new-model-x"          # repointed
+    assert "new-model-x" in _body(msgs)
+
+
+async def test_model_switch_target_batch_does_not_repoint_main(mock_inference_server):
+    # --target batch swaps the batch slot; the main session pointer is untouched.
+    inf = MagicMock(default_model="main-model", base_url=mock_inference_server)
+    agent = MagicMock(inference=inf)
+    msgs = await _collect(Model().run("--target batch batch-model", _ctx(agent)))
+    assert inf.default_model == "main-model"           # main pointer unchanged
+    assert "batch" in _body(msgs)
+
+
+async def test_model_list(mock_inference_server):
+    inf = MagicMock(default_model="test-model", base_url=mock_inference_server)
+    agent = MagicMock(inference=inf)
+    msgs = await _collect(Model().run("list", _ctx(agent)))
     body = _body(msgs)
-    assert "new-model-x" in body
+    assert "Available models" in body
+    assert "test-model" in body
+
+
+async def test_model_default_resets_session(mock_inference_server):
+    inf = MagicMock(default_model="something-else", base_url=mock_inference_server)
+    agent = MagicMock(inference=inf, config=MagicMock(model="config-default-model"))
+    msgs = await _collect(Model().run("default", _ctx(agent)))
+    assert inf.default_model == "config-default-model"
+    assert "config-default-model" in _body(msgs)
+
+
+async def test_model_swap_failure_does_not_repoint():
+    # Unreachable manager -> swap fails -> session pointer must NOT change.
+    inf = MagicMock(default_model="stay-put", base_url="http://127.0.0.1:1")
+    agent = MagicMock(inference=inf)
+    msgs = await _collect(Model().run("wont-load", _ctx(agent)))
+    assert inf.default_model == "stay-put"             # unchanged on failure
+    combined = " ".join(
+        (getattr(m, "text", "") or getattr(m, "error", "")) for m in msgs
+    )
+    assert "failed" in combined.lower()
 
 
 # ---------------------------------------------------------------------------
