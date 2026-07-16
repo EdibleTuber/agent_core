@@ -86,9 +86,11 @@ class SearchVault(Tool):
 
     name = "search_vault"
     description = (
-        "Semantic search over the vault. Returns JSON: "
+        "Semantic search over the vault, optionally filtered by `tags`. Returns JSON: "
         "{status, query, count, results: [{path, name, summary, score}]}. "
-        "Use the `path` field directly for cat/edit/grep."
+        "Use the `path` field directly for cat/edit/grep. "
+        "Pass `doc_id` instead of `query` to fetch a known document directly "
+        "(skips search, returns its full content)."
     )
     parameters = {
         "type": "object",
@@ -98,21 +100,47 @@ class SearchVault(Tool):
                 "type": "integer",
                 "description": "Cap on results (default 5, max 20).",
             },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional tag filter (AND-ed with the query).",
+            },
+            "doc_id": {
+                "type": "string",
+                "description": "Fetch this document by id directly (skips search).",
+            },
         },
-        "required": ["query"],
+        "required": [],
     }
     requires = ("retrieval",)
 
     async def run(self, args, ctx):
+        doc_id = (args.get("doc_id") or "").strip()
+        if doc_id:
+            try:
+                doc = await ctx.agent.retrieval.get_document(doc_id)
+            except Exception as exc:
+                return json.dumps({
+                    "status": "error",
+                    "doc_id": doc_id,
+                    "reason": f"Fetch error: {type(exc).__name__}: {exc}",
+                })
+            return json.dumps({
+                "status": "ok",
+                "doc_id": doc_id,
+                "name": doc.get("name", ""),
+                "content": doc.get("content", ""),
+            })
         query = (args.get("query") or "").strip()
         if not query:
             return json.dumps({
                 "status": "error",
-                "reason": "'query' parameter is required.",
+                "reason": "'query' or 'doc_id' is required.",
             })
         max_results = max(1, min(int(args.get("max_results", 5)), 20))
+        tags = args.get("tags") or None
         try:
-            results = await ctx.agent.retrieval.search(query, limit=max_results)
+            results = await ctx.agent.retrieval.search(query, limit=max_results, tags=tags)
         except Exception as exc:
             return json.dumps({
                 "status": "error",
