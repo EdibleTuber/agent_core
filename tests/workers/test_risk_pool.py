@@ -328,3 +328,67 @@ async def test_no_send_channel_fails_closed(tmp_path):
     rows = _audit_lines(tmp_path)
     assert rows[0]["outcome"] == "approval_undeliverable"
     assert reg._pending == {}     # no entry created when there's no channel
+
+
+# --- worker in-band error envelope -> honest audit ---------------------------
+
+def _result_with_text(text, is_error=False):
+    class _Block:
+        type = "text"
+        def __init__(self, t): self.text = t
+    class _R:
+        content = [_Block(text)]
+        isError = is_error
+    return _R()
+
+
+@pytest.mark.asyncio
+async def test_worker_error_envelope_audits_error_with_message(tmp_path):
+    """A tool that returns normally but with an {"error": true} envelope (as the
+    frida/static workers do) must audit as 'error', and the worker's message must
+    land in the audit 'detail' field — not be silently recorded as 'ok'."""
+    inner = _InnerPool()
+    async def envelope_error(worker, tool, arguments):
+        inner.calls.append((worker, tool, arguments))
+        return _result_with_text(json.dumps({
+            "summary": "process 'sg.vp.owasp_mobile.omtg_android' not found",
+            "error": True,
+            "detail": "no matching process or application",
+        }), is_error=False)   # worker returned normally; only the envelope signals failure
+    inner.call_tool = envelope_error
+    pool = _pool(inner, [_spec("frida", "low")], audit_dir=tmp_path)
+
+    await pool.call_tool("frida", "attach", {"target": "sg.vp.owasp_mobile.omtg_android"})
+    rows = _audit_lines(tmp_path)
+    assert rows[0]["outcome"] == "error"
+    assert "not found" in (rows[0]["detail"] or "")
+    assert "no matching process" in (rows[0]["detail"] or "")
+
+
+@pytest.mark.asyncio
+async def test_worker_success_envelope_still_audits_ok(tmp_path):
+    inner = _InnerPool()
+    async def ok_call(worker, tool, arguments):
+        inner.calls.append((worker, tool, arguments))
+        return _result_with_text(json.dumps({"summary": "attached pid 19322", "pid": 19322}))
+    inner.call_tool = ok_call
+    pool = _pool(inner, [_spec("frida", "low")], audit_dir=tmp_path)
+
+    await pool.call_tool("frida", "attach", {})
+    rows = _audit_lines(tmp_path)
+    assert rows[0]["outcome"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_non_json_text_content_audits_ok(tmp_path):
+    """Defensive: a non-JSON text payload must not crash the error probe."""
+    inner = _InnerPool()
+    async def plain_call(worker, tool, arguments):
+        inner.calls.append((worker, tool, arguments))
+        return _result_with_text("just a plain string, not an envelope")
+    inner.call_tool = plain_call
+    pool = _pool(inner, [_spec("frida", "low")], audit_dir=tmp_path)
+
+    await pool.call_tool("frida", "attach", {})
+    rows = _audit_lines(tmp_path)
+    assert rows[0]["outcome"] == "ok"

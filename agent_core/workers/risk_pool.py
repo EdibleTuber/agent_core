@@ -8,6 +8,7 @@ straight through (discovery is read-only and ungated).
 from __future__ import annotations
 
 import copy
+import json
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -37,6 +38,32 @@ class _ErrorResult:
             text = message
 
         self.content = [_Block()]
+
+
+def _worker_error_message(result) -> str | None:
+    """Return the worker's error message when the result carries an in-band
+    ``{"error": true}`` envelope, else None.
+
+    Internal workers report failures by returning normally with an error
+    envelope rather than raising, so ``isError`` stays False. This surfaces that
+    envelope for honest auditing. Defensive against non-JSON / non-envelope
+    content: anything unparseable yields None (treated as success).
+    """
+    for block in getattr(result, "content", None) or []:
+        text = getattr(block, "text", None)
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(payload, dict) and payload.get("error") is True:
+            msg = str(payload.get("summary") or "worker error")
+            detail = payload.get("detail")
+            if detail:
+                msg = f"{msg}: {detail}"
+            return msg[:500]
+    return None
 
 
 class RiskAwareToolPool:
@@ -181,14 +208,22 @@ class RiskAwareToolPool:
                        tier_source)
             return _ErrorResult(f"{worker}.{tool} call failed: {exc}")
         latency = int((time.monotonic() - start) * 1000)
-        is_error = bool(getattr(result, "isError", False))
+        # Internal workers signal failure with an in-band {"error": true} envelope
+        # while returning normally (FastMCP only sets isError on a raise), so the
+        # protocol flag alone would record these as "ok". Honour both, and carry
+        # the worker's own message into the audit detail.
+        worker_err = _worker_error_message(result)
+        is_error = bool(getattr(result, "isError", False)) or worker_err is not None
         if is_error:
             outcome = "error"
+            detail = worker_err or session_note
         elif session_note == "session-approved" or effective in ("high", "critical"):
             outcome = "hitl_approved"
+            detail = session_note
         else:
             outcome = "ok"
-        self._emit(worker, tool, snapshot, declared, effective, latency, outcome, gate_override, session_note,
+            detail = session_note
+        self._emit(worker, tool, snapshot, declared, effective, latency, outcome, gate_override, detail,
                    tier_source)
         return result
 
