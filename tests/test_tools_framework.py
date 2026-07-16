@@ -112,7 +112,7 @@ async def test_search_vault_calls_retrieval():
     ])
     agent = MagicMock(retrieval=retrieval)
     result = await SearchVault().run({"query": "test"}, _ctx(agent))
-    retrieval.search.assert_called_once_with("test", limit=5)
+    retrieval.search.assert_called_once_with("test", limit=5, tags=None)
     payload = json.loads(result)
     assert payload["status"] == "ok"
     assert payload["query"] == "test"
@@ -206,7 +206,7 @@ async def test_search_vault_max_results_clamped_and_passed():
     retrieval.search = AsyncMock(return_value=[])
     agent = MagicMock(retrieval=retrieval)
     await SearchVault().run({"query": "x", "max_results": 50}, _ctx(agent))
-    retrieval.search.assert_called_once_with("x", limit=20)
+    retrieval.search.assert_called_once_with("x", limit=20, tags=None)
 
 
 # ---------------------------------------------------------------------------
