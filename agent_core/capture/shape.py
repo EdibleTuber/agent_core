@@ -49,6 +49,13 @@ def normalize_addrs(body: str) -> list[str]:
 
 
 def is_substantial(value: Any, rows: list[dict], serialized_bytes: int, inline_budget: int) -> bool:
+    """Relevance predicate: is this result a list, multi-row, or over-budget?
+
+    No longer gates STORAGE — the CaptureLayer now persists every result
+    unconditionally (Store != Substitute). Retained as a relevance signal for
+    ranking / retrieval-side use (a single small ack is less worth surfacing
+    than a 150-row enumeration).
+    """
     if isinstance(value, list) and rows:
         return True
     if len(rows) > 1:

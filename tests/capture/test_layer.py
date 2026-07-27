@@ -12,8 +12,32 @@ class _Result:
     def __init__(self, text): self.isError = False; self.content = [_Block(text)]
 
 
+class _ErrResult:
+    def __init__(self, text): self.isError = True; self.content = [_Block(text)]
+
+
 def _layer(budget=200):
     return CaptureLayer(CaptureStore.open_memory(), inline_budget=budget, launch_ts=1.0)
+
+
+def test_small_single_row_result_is_stored():
+    # Store != Substitute: a small single-row result stays inline (not stubbed)
+    # but is still persisted for search/retrieval (was previously dropped).
+    layer = _layer()
+    r = _Result(json.dumps({"summary": "1 def rows", "rows": [{"class": "X", "method": "y"}]}))
+    out = layer.maybe_substitute("static", "find_symbol", r, substitute=True)
+    assert out is r                              # small -> inline, not stubbed
+    assert len(layer.store.recent()) == 1        # ...but stored
+
+
+def test_error_result_is_stored_and_passed_through():
+    # Errors are captured too, so a failed run is searchable/reviewable; still
+    # never stubbed (returned verbatim so the model sees the failure).
+    layer = _layer()
+    r = _ErrResult(json.dumps({"summary": "boom", "error": True}))
+    out = layer.maybe_substitute("static", "decompile_method", r, substitute=True)
+    assert out is r
+    assert len(layer.store.recent()) == 1
 
 
 def test_small_result_passes_through_unsubstituted():

@@ -108,7 +108,11 @@ class RiskAwareToolPool:
             worker, tool, arguments, snapshot, declared, effective, gate_override,
             session_note, tier_source,
         )
-        if self._capture is not None and not getattr(result, "isError", False):
+        if self._capture is not None:
+            # Route ALL executed results through the capture layer — including
+            # errors — so a failed run stays searchable. The layer stores
+            # unconditionally and never stubs an error. (Approval blocks/denials
+            # returned earlier and are intentionally not captured: no tool ran.)
             session_id = arguments.get("session_id") if isinstance(arguments, dict) else None
             return self._capture.maybe_substitute(worker, tool, result, substitute=capture,
                                                   session_id=session_id)

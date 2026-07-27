@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from agent_core.capture.store import CaptureStore, CaptureRecord
-from agent_core.capture.shape import infer_rows, columns, normalize_addrs, is_substantial
+from agent_core.capture.shape import infer_rows, columns, normalize_addrs
 from agent_core.capture.stub import build_stub
 
 
@@ -44,25 +44,28 @@ class CaptureLayer:
 
     def maybe_substitute(self, worker: str, tool: str, result: Any, *, substitute: bool,
                          session_id: str | None = None) -> Any:
-        if getattr(result, "isError", False):
-            return result
+        # Store != Substitute. STORING is unconditional: every result — small or
+        # large, single-row or many, success or error — is persisted so it stays
+        # searchable/re-viewable (the flywheel needs recall, not just big rows).
+        # Only the in-context SUBSTITUTION (swap the payload for a bounded stub)
+        # is gated, purely on size, and never for errors.
         store = self.store
         if store is None:
-            return result  # no project store bound this turn -> don't capture
+            return result  # no project store bound this turn -> can't capture
         text = stringify_result(result)
         try:
             value = json.loads(text)
         except (ValueError, TypeError):
-            value = text  # opaque blob -> degenerate row
+            value = text  # opaque blob / error text -> degenerate row
         rows = infer_rows(value)
         body_bytes = len(text.encode("utf-8"))
-        if not is_substantial(value, rows, body_bytes, self._budget):
-            return result
         ref = store.write(CaptureRecord(
             worker=worker, tool=tool, session_id=session_id, launch_ts=self._launch_ts,
             summary=f"{tool}: {len(rows)} row(s)", body=text,
             rows=len(rows), addrs=normalize_addrs(text),
         ))
+        if getattr(result, "isError", False):
+            return result  # errors are stored but never stubbed — the model must see them
         if not substitute or body_bytes <= self._budget:
             return result  # stored, but the caller sees the real payload
         stub = build_stub(worker=worker, ref=ref, rows=len(rows),

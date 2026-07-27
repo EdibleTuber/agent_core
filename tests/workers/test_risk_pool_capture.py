@@ -84,10 +84,12 @@ async def test_capture_layer_none_is_passthrough(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_error_result_not_captured(tmp_path):
-    """Error results are passed through without being stored in the capture layer."""
+async def test_error_result_captured_but_never_substituted(tmp_path):
+    """Error results ARE stored (a failed run stays searchable/reviewable) but
+    are passed through verbatim — never swapped for a stub — so the model sees
+    the failure."""
     layer = CaptureLayer(CaptureStore.open_memory(), inline_budget=100, launch_ts=1.0)
     pool = _pool(layer, tmp_path, inner=_ErrorInnerPool())
     result = await pool.call_tool("frida", "read_memory", {}, ctx=None)
     assert result.isError is True
-    assert layer.store.recent() == []
+    assert len(layer.store.recent()) == 1
