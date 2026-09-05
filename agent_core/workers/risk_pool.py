@@ -141,6 +141,15 @@ class RiskAwareToolPool:
         self._inner.remove_spec(worker)
         self._bump(worker)
 
+    async def connect(self, worker: str, timeout: float | None = None) -> None:
+        """Delegate to the inner pool. WorkerManager calls this rather than
+        reaching through `self._pool._inner` — the pool, not the manager,
+        owns knowledge of the inner client pool's shape."""
+        await self._inner.connect(worker, timeout=timeout)
+
+    async def disconnect(self, worker: str) -> None:
+        await self._inner.disconnect(worker)
+
     def record_session_approval(self, worker: str, tool: str, generation: int) -> None:
         """Record only if the worker has not been reloaded since the approval
         was requested. An operator answering a prompt after a reload must not
