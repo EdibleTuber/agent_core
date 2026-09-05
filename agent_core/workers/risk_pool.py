@@ -31,8 +31,15 @@ _TIER_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def _max_tier(a: str | None, b: str | None) -> str | None:
-    """The higher of two tiers; None only if both are None/unknown."""
-    known = [t for t in (a, b) if t in _TIER_ORDER]
+    """The higher of two tiers; None if neither is a recognized tier string.
+
+    Inputs may be hostile/arbitrary (dict, list, bool, ...) — risk.py:57-59
+    documents this for the wire tier specifically, and it applies equally to
+    anything read from `_tool_tiers`/`_tier_highwater`. The isinstance guard
+    must run before the `in` membership test, since `_TIER_ORDER` is a dict
+    and membership-testing an unhashable value (a dict/list) raises TypeError.
+    """
+    known = [t for t in (a, b) if isinstance(t, str) and t in _TIER_ORDER]
     return max(known, key=lambda t: _TIER_ORDER[t]) if known else None
 
 
@@ -172,16 +179,27 @@ class RiskAwareToolPool:
                 # A nameless tool from a buggy/hostile worker must not abort
                 # discovery of the worker's remaining tools.
                 continue
-            meta = getattr(tool, "meta", None) or {}
-            tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else None
-            self._tool_tiers[(worker, name)] = tier
-            hw = _max_tier(tier, self._tier_highwater.get((worker, name)))
-            if hw is not None:
-                self._tier_highwater[(worker, name)] = hw
+            try:
+                meta = getattr(tool, "meta", None) or {}
+                tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else None
+                self._tool_tiers[(worker, name)] = tier
+                hw = _max_tier(tier, self._tier_highwater.get((worker, name)))
+                if hw is not None:
+                    self._tier_highwater[(worker, name)] = hw
+            except Exception:
+                # Same guarantee as the nameless-tool case above, extended to a
+                # malformed/hostile per-tool entry (bad meta shape, unhashable
+                # tier value, ...): one bad entry must not abort discovery of
+                # this worker's remaining tools, nor of tools already recorded.
+                continue
         return result
 
     async def close_all(self) -> None:
-        for worker in list(self._generations) or self._inner.names():
+        # Union, not `or`: `or` short-circuits on the first truthy operand, so
+        # once ANY worker has ever been reloaded (`_generations` non-empty),
+        # every never-reloaded worker in `_inner.names()` would be skipped and
+        # keep its session approvals across a full teardown.
+        for worker in set(self._generations) | set(self._inner.names()):
             self._bump(worker)
         await self._inner.close_all()
 
@@ -190,13 +208,24 @@ class RiskAwareToolPool:
                         capture: bool = True):
         snapshot = copy.deepcopy(arguments) if isinstance(arguments, dict) else {}
         # A tool with no advertised tier resolves to the worker's risk_default
-        # FLOOR (risk.py:68) -- not a fail-safe to high. Safety for dangerous
-        # tools that fail to advertise comes from operator pins plus the
-        # session high-water mark below, never from a dispatch-time fallback.
+        # FLOOR (risk.py:75-78) -- not a fail-safe to high. Safety for
+        # dangerous tools that fail to advertise comes from operator pins plus
+        # the session high-water mark below, never from a dispatch-time
+        # fallback.
         spec = self.spec_for(worker)
-        advertised = _max_tier(self._tool_tiers.get((worker, tool)),
-                               self._tier_highwater.get((worker, tool)))
-        declared, tier_source = resolve_declared_tier(spec, advertised)
+        # Resolve against THIS dispatch's raw wire tier first, so
+        # resolve_declared_tier can still classify a malformed value as
+        # "invalid_advertised" (a tampering signal, risk.py:57-59) rather than
+        # having it silently collapse to "floor" -- which is what pre-combining
+        # via _max_tier before this call would do, since _max_tier only ever
+        # returns a recognized tier or None. The high-water mark then escalates
+        # on top, without erasing that provenance unless it actually applies.
+        wire_tier = self._tool_tiers.get((worker, tool))
+        declared, tier_source = resolve_declared_tier(spec, wire_tier)
+        high = self._tier_highwater.get((worker, tool))
+        if (tier_source != "unknown_worker" and high is not None
+                and _TIER_ORDER.get(high, -1) > _TIER_ORDER.get(declared, -1)):
+            declared, tier_source = high, "wire"
         gen = self.generation(worker)
         decision = self._gate.evaluate(worker=worker, tool=tool, declared_tier=declared)
         effective = decision.effective_tier
@@ -238,7 +267,7 @@ class RiskAwareToolPool:
         return self._send
 
     async def _await_operator(self, worker, tool, snapshot, declared, effective, gate_override, send,
-                              tier_source=None, generation=0):
+                              tier_source, generation):
         """Returns an _ErrorResult if the call should NOT proceed, else None."""
         from agent_core.protocol.messages import ToolApprovalRequestMessage
 
