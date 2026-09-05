@@ -329,11 +329,15 @@ class WorkerManager:
         out: list[WorkerOpResult] = []
         for name, res in zip(targets, results):
             if isinstance(res, BaseException):
+                message = f"{type(res).__name__}: {res}"
                 logger.warning("worker %s: load_autoload crashed unexpectedly: %s",
                                name, res, exc_info=res)
+                # Record like every other failure path does: status() and
+                # unavailable_reason() are the operator's only window onto why
+                # a worker is missing, and both read from self._errors.
+                self._errors[name] = message
                 out.append(WorkerOpResult(
-                    "load", name, False,
-                    error=f"{type(res).__name__}: {res}", error_kind="spawn_failed"))
+                    "load", name, False, error=message, error_kind="spawn_failed"))
             else:
                 out.append(res)
         return out
