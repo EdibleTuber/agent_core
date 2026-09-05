@@ -103,8 +103,6 @@ class RiskAwareToolPool:
         capture_layer: "CaptureLayer | None" = None,
     ) -> None:
         self._inner = inner
-        for spec in (specs or {}).values():
-            inner.add_spec(spec)
         self._gate = risk_gate
         self._registry = approval_registry
         self._audit = audit_log
@@ -127,6 +125,15 @@ class RiskAwareToolPool:
         # downgrade channel the high-water comment above claims to close.
         self._floor_highwater: dict[str, str] = {}
         self._generations: dict[str, int] = {}
+        # Registered LAST, and through _record_floor rather than a bare
+        # inner.add_spec: seeding the floor ratchet eagerly is what keeps a
+        # constructor-supplied worker that is never dispatched to from having
+        # its floor lowered by a later add_spec/reload. Deliberately not via
+        # self.add_spec() -- these are the session's initial specs, so bumping
+        # every generation off zero here would be noise.
+        for spec in (specs or {}).values():
+            inner.add_spec(spec)
+            self._record_floor(spec.name, spec)
 
     # --- lifecycle ---------------------------------------------------------
     def spec_for(self, worker: str):
