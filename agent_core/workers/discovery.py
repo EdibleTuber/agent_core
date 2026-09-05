@@ -1,36 +1,58 @@
-"""discover_and_register — top-level worker discovery driver.
+"""discover_and_register — DEPRECATED boot-time worker discovery driver.
+
+DEPRECATED since 1.8.0; use `WorkerManager.load` / `WorkerManager.load_autoload`
+instead. This function predates the runtime worker lifecycle and duplicates a
+strict subset of it: it has its own loop and its own fixed 2s timeout, and it
+has NO per-worker locking, NO tool-name collision refusal, no WorkerOpResult,
+no `last_error` for `/worker list`, and no generation bookkeeping (so nothing
+evicts a session approval when a worker is replaced). It is retained only for
+consumers that have not migrated.
+
+`pool` must be a `RiskAwareToolPool`, not the inner `MCPClientPool`. Both expose
+the same `list_tools`/`call_tool` signatures, but only the wrapper records the
+per-tool wire tiers that later dispatches gate on, and only the wrapper gates
+and audits dispatch at all — pass the inner pool and every synthesized tool
+runs ungated with no wire tier ever recorded.
 
 Iterates a list of WorkerSpec entries, connects each via the pool,
 fetches list_tools, and produces Tool subclasses ready for an agent's
 register_tools() to return.
 
 A worker that fails to connect or list tools is logged loudly and
-skipped — the agent still starts with whichever workers DID respond.
-This is the framework-side enforcement of the spec's "connection
-failures non-fatal, surfaced in /health" guarantee.
+skipped — the agent still starts with whichever workers DID respond
+("connection failures non-fatal, surfaced in /health"). WorkerManager
+owns that guarantee now.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 
+from typing import TYPE_CHECKING
+
 from agent_core.tools.base import Tool
-from agent_core.workers.client_pool import MCPClientPool
 from agent_core.workers.tool_factory import make_tool_class
 from agent_core.workers.types import WorkerSpec
+
+if TYPE_CHECKING:
+    from agent_core.workers.risk_pool import RiskAwareToolPool
 
 logger = logging.getLogger(__name__)
 
 
 async def discover_and_register(
     specs: list[WorkerSpec],
-    pool: MCPClientPool,
+    pool: "RiskAwareToolPool",
 ) -> list[type[Tool]]:
-    """Discover tools across all workers; return ready-to-register Tool classes.
+    """DEPRECATED — use `WorkerManager.load_autoload`. See the module docstring.
+
+    Discover tools across all workers; return ready-to-register Tool classes.
 
     Args:
         specs: WorkerSpec entries from the agent's WorkerRegistry.
-        pool: The MCPClientPool that will back the synthesized Tools at call time.
+        pool: The RiskAwareToolPool that will back the synthesized Tools at
+            call time. Passing the inner MCPClientPool disables the risk gate,
+            approval and audit entirely, and records no wire tiers.
 
     Returns:
         List of Tool subclasses; empty if no workers responded. Caller passes

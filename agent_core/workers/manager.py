@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Literal
@@ -25,6 +27,39 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONNECT_TIMEOUT = 10.0
 DEFAULT_DISCONNECT_TIMEOUT = 5.0
+
+
+def _artifact_args(spec) -> dict:
+    """Resolve the worker's binary and stat it, for the audit row.
+
+    Spec section 7 requires a lifecycle row to carry "the resolved `command`
+    path plus the binary's mtime/size" so that an artifact swap -- the branch's
+    own central threat model, a different binary appearing at the same path
+    between two loads -- is visible in the log. The raw `spec.command` alone is
+    byte-identical before and after such a swap.
+
+    Every field is best-effort: a missing or unresolvable binary records as
+    None and must never fail the load.
+    """
+    command = spec.command or spec.endpoint
+    resolved = None
+    if spec.transport == "stdio" and command:
+        try:
+            resolved = shutil.which(command) or os.path.abspath(command)
+        except OSError:
+            resolved = None
+    args = {"command": command, "resolved_command": resolved,
+            "command_mtime": None, "command_size": None}
+    if resolved:
+        try:
+            st = os.stat(resolved)
+        except OSError:
+            pass
+        else:
+            args["command_mtime"] = st.st_mtime
+            args["command_size"] = st.st_size
+    return args
+
 
 ErrorKind = Literal[
     "unknown_worker", "spawn_failed", "connect_timeout", "protocol_mismatch",
@@ -64,6 +99,20 @@ class WorkerManager:
     def __init__(self, registry: WorkerRegistry, tool_pool, executor,
                  *, connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
                  disconnect_timeout: float = DEFAULT_DISCONNECT_TIMEOUT) -> None:
+        if not callable(getattr(tool_pool, "emit_lifecycle", None)):
+            # Every other method this class calls on `tool_pool` -- add_spec,
+            # remove_spec, connect, disconnect, list_tools -- exists
+            # identically on the inner MCPClientPool, and make_tool_class binds
+            # every synthesized tool to whatever pool is passed here. Wiring
+            # the inner pool in by mistake therefore produced a fully working
+            # worker fleet with NO risk gate, NO approval and NO audit, whose
+            # only symptom was one logger.warning per load. RiskAwareToolPool
+            # is the entire security boundary, so refuse the mis-wire outright.
+            raise TypeError(
+                "WorkerManager requires a RiskAwareToolPool (the enforcement "
+                "wrapper), not a bare MCPClientPool: the object passed as "
+                f"tool_pool ({type(tool_pool).__name__}) has no emit_lifecycle(), "
+                "which means it cannot be gating or auditing dispatch either")
         self._registry = registry
         self._pool = tool_pool
         self._executor = executor
@@ -142,11 +191,38 @@ class WorkerManager:
                                       tools=list(self._loaded[name]))
             return await self._load_locked(spec)
 
-    async def _load_locked(self, spec) -> WorkerOpResult:
+    async def _load_locked(self, spec, action: str = "load") -> WorkerOpResult:
         """Body of a load, assuming self._locks[spec.name] is already held
         and the worker is not currently loaded. Shared by load() and
         reload() so reload never has to release and re-acquire the lock
-        between its unload half and its load half (see reload())."""
+        between its unload half and its load half (see reload()).
+
+        The BaseException guard is the load's ONLY complete rollback. Every
+        `except` in `_load_body` is an `except Exception`, and add_spec()
+        registers the spec -- bumping the generation, which CLEARS the
+        worker's wire-tier table -- before the first await. A CancelledError
+        (the daemon cancels a handler task the moment its client disconnects,
+        so Ctrl-C on `/worker load` produces exactly this) therefore escaped
+        every rollback: no remove_spec, no _errors entry, no _loaded entry,
+        while the pool's owner task went on to finish connecting and publish a
+        live client. `status()` showed the worker not loaded WITH NO ERROR, and
+        a direct tool_pool.call_tool -- which consumers do by hard-coded name,
+        bypassing the executor -- found a live spec, an empty tier table and no
+        high-water entry, and auto-executed at the worker's risk_default floor
+        with no prompt, audited indistinguishably from an honest low-tier call.
+
+        Roll back, then re-raise: a genuine cancellation of the caller's task
+        must still propagate.
+        """
+        try:
+            return await self._load_body(spec, action)
+        except BaseException as exc:
+            with contextlib.suppress(Exception):
+                await self._fail(spec.name, "spawn_failed",
+                                 f"{type(exc).__name__}: {exc}")
+            raise
+
+    async def _load_body(self, spec, action: str = "load") -> WorkerOpResult:
         name = spec.name
         try:
             self._pool.add_spec(spec)
@@ -206,9 +282,10 @@ class WorkerManager:
         self._errors.pop(name, None)
         try:
             self._pool.emit_lifecycle(name, "worker_loaded",
-                                      args={"transport": spec.transport,
-                                            "command": spec.command or spec.endpoint,
-                                            "tool_count": len(names)})
+                                      args={"action": action,
+                                            "transport": spec.transport,
+                                            "tool_count": len(names),
+                                            **_artifact_args(spec)})
         except Exception:
             # A lifecycle audit row is not worth failing an otherwise-good
             # load over (real disk I/O — AuditLog.append can raise OSError).
@@ -234,6 +311,11 @@ class WorkerManager:
         self._executor.remove_worker(name)
         self._pool.remove_spec(name)
         self._loaded.pop(name, None)
+        # Recorded BEFORE the only await in this method: _fail is now also the
+        # rollback for a cancelled load, and a second cancellation landing in
+        # the disconnect below must still leave status()/unavailable_reason()
+        # able to say why the worker is missing.
+        self._errors[name] = message
         try:
             await asyncio.wait_for(self._pool.disconnect(name),
                                    timeout=self._disconnect_timeout)
@@ -245,7 +327,6 @@ class WorkerManager:
         except Exception:
             logger.warning("worker %s: disconnect during load rollback failed",
                            name, exc_info=True)
-        self._errors[name] = message
         logger.warning("worker %s load failed (%s): %s", name, kind, message)
         return WorkerOpResult("load", name, False, error=message, error_kind=kind)
 
@@ -253,8 +334,12 @@ class WorkerManager:
         async with self._locks[name]:
             return await self._unload_locked(name)
 
-    async def _unload_locked(self, name: str) -> WorkerOpResult:
-        """Body of an unload, assuming self._locks[name] is already held."""
+    async def _unload_locked(self, name: str, action: str = "unload") -> WorkerOpResult:
+        """Body of an unload, assuming self._locks[name] is already held.
+
+        `action` is carried into the audit row so a reload is distinguishable
+        from an unrelated unload followed by an unrelated load (spec section 7).
+        """
         if not self.is_loaded(name):
             return WorkerOpResult("unload", name, True)
         # Order matters: everything before the disconnect is unconditional
@@ -275,7 +360,8 @@ class WorkerManager:
             logger.warning(err)
         try:
             self._pool.emit_lifecycle(name, "worker_unloaded",
-                                      detail=err, args={"tools_removed": removed})
+                                      detail=err, args={"action": action,
+                                                        "tools_removed": removed})
         except Exception:
             logger.warning("worker %s: failed to record worker_unloaded audit row",
                            name, exc_info=True)
@@ -295,7 +381,7 @@ class WorkerManager:
         directly rather than the public, separately-locking methods.
         """
         async with self._locks[name]:
-            un = await self._unload_locked(name)
+            un = await self._unload_locked(name, action="reload")
             if not un.ok:
                 return WorkerOpResult("reload", name, False,
                                       error=f"unload half failed: {un.error}",
@@ -307,7 +393,7 @@ class WorkerManager:
                     "reload", name, False, error_kind="unknown_worker",
                     error=(f"no worker named {name!r}; declared: "
                            f"{sorted(s.name for s in self._registry.all())}"))
-            res = await self._load_locked(spec)
+            res = await self._load_locked(spec, action="reload")
             return WorkerOpResult("reload", name, res.ok, res.tool_count, res.tools,
                                   res.error, res.error_kind)
 

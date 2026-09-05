@@ -8,6 +8,7 @@ until the event loop exits. Every pre-existing test in test_client_pool.py
 connects and closes inside one coroutine, so none of them can catch this.
 """
 import asyncio
+import contextlib
 import os
 import sys
 
@@ -38,17 +39,21 @@ async def test_reap_propagates_caller_cancellation_without_cancelling_the_owner(
     CancelledError past it. That makes `task.cancelled()` become True as a
     result of the CALLER's own cancellation, defeating the disambiguation
     `_reap` relies on and silently eating the cancellation.
+
+    Since the final review, the caller's cancellation ALSO means "stop
+    waiting for this owner" -- it is how a manager-level disconnect_timeout
+    reaches the pool -- so the owner is handed to `_abandon()`: its child is
+    hard-killed and the task is cancelled and parked in `_orphans` rather
+    than left running behind a dropped reference. What must NOT change is
+    that the caller's own cancellation still propagates.
     """
     from agent_core.workers.client_pool import MCPClientPool
 
     pool = MCPClientPool([stdio_stub_spec("stub", "low")])
     await pool.list_tools("stub")             # connects; owner now parked
     owner = pool._owners["stub"]
-    # Captured BEFORE calling _reap: _reap's `finally` unconditionally pops
-    # this worker's entry out of self._stop (via _cleanup), including on the
-    # re-raise path below, so looking it up afterwards would find nothing to
-    # set and leave the still-parked owner waiting forever.
-    stop_event = pool._stop["stub"]
+    pid = pool._owner_pid("stub")
+    assert pid is not None and _alive(pid)
 
     ran_after = []
 
@@ -62,12 +67,14 @@ async def test_reap_propagates_caller_cancellation_without_cancelling_the_owner(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert ran_after == [], "the caller's cancellation must propagate, not be absorbed"
-    assert not owner.done(), "the owner task must survive the caller's own cancellation"
+    # Abandoned, not silently dropped: still reachable (in _orphans until it
+    # finishes unwinding) and its child already killed.
+    assert owner in pool._orphans or owner.done()
 
-    # Clean up the still-parked owner directly -- this test bypassed
-    # disconnect() to isolate _reap on the caller-cancelled path.
-    stop_event.set()
-    await owner
+    with contextlib.suppress(asyncio.CancelledError):
+        await owner
+    assert owner.done()
+    assert not _alive(pid), "the abandoned owner's child survived _reap"
 
 
 async def test_reap_returns_cleanly_when_the_owner_finishes_normally(stdio_stub_spec):

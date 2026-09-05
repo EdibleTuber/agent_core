@@ -7,11 +7,13 @@ to avoid cross-worker collisions.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agent_core.tools.base import Tool
-from agent_core.workers.client_pool import MCPClientPool
 from agent_core.workers.types import WorkerSpec
+
+if TYPE_CHECKING:
+    from agent_core.workers.risk_pool import RiskAwareToolPool
 
 
 def _stringify_result(result: Any) -> str:
@@ -28,14 +30,20 @@ def _stringify_result(result: Any) -> str:
 def make_tool_class(
     worker: WorkerSpec,
     tool_def: dict,
-    pool: MCPClientPool,
+    pool: "RiskAwareToolPool",
 ) -> type[Tool]:
     """Produce a Tool subclass that calls the given worker's tool via the pool.
+
+    The annotation is not decoration. `RiskAwareToolPool` and the inner
+    `MCPClientPool` both expose `call_tool(worker, tool, arguments, ctx=...)`,
+    so passing the inner one produces a tool that works perfectly and
+    dispatches with no risk evaluation, no approval prompt and no audit row.
+    Pass the enforcement wrapper.
 
     Args:
         worker: WorkerSpec for the worker (provides name + endpoint).
         tool_def: One MCP tool definition (dict with name, description, inputSchema).
-        pool: The shared MCPClientPool the synthesized Tool calls into.
+        pool: The shared RiskAwareToolPool the synthesized Tool calls into.
 
     Returns:
         A new Tool subclass. Caller registers it via agent.register_tools().

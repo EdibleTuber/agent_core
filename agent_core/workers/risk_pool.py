@@ -2,8 +2,13 @@
 """RiskAwareToolPool — enforcement wrapper around MCPClientPool.
 
 call_tool is the single chokepoint: risk-evaluate, gate high/critical on
-operator approval, audit every dispatch. list_tools/close_all proxy
-straight through (discovery is read-only and ungated).
+operator approval, audit every dispatch.
+
+`list_tools` and `close_all` are ungated for the CALLER, but neither is a
+pass-through: `list_tools` writes the per-tool wire tiers and the session
+high-water mark that every later resolution reads, and `close_all` bumps
+every worker's generation and evicts its session approvals. Both mutate
+security state, so both belong to this class rather than the inner pool.
 """
 from __future__ import annotations
 
@@ -113,6 +118,14 @@ class RiskAwareToolPool:
         # escalate-only must be monotonic across time, not just within one
         # resolution, or a reload becomes a downgrade channel (spec 6.4.1).
         self._tier_highwater: dict[tuple[str, str], str] = {}
+        # Highest risk_default FLOOR ever seen for a worker this session, and
+        # never evicted, for the same reason. _tier_highwater is fed only from
+        # the wire meta, so it said nothing about the floor -- while reload()
+        # re-reads the registry on every reload and WorkerRegistry.add() is
+        # public. Lower a worker's risk_default, re-add it, /worker reload, and
+        # every non-advertising tool dropped to the new floor: exactly the
+        # downgrade channel the high-water comment above claims to close.
+        self._floor_highwater: dict[str, str] = {}
         self._generations: dict[str, int] = {}
 
     # --- lifecycle ---------------------------------------------------------
@@ -135,7 +148,23 @@ class RiskAwareToolPool:
 
     def add_spec(self, spec) -> None:
         self._inner.add_spec(spec)
+        self._record_floor(spec.name, spec)
         self._bump(spec.name)
+
+    def _record_floor(self, worker: str, spec) -> None:
+        """Fold a spec's risk_default into the per-worker floor ratchet.
+
+        Called from add_spec (so a reload's new spec is seen even if the worker
+        is never dispatched to) and from _resolve_declared (so a spec that
+        reached the inner pool by another route -- the constructor, a direct
+        inner.add_spec -- is seen too).
+        """
+        if spec is None:
+            return
+        hw = _max_tier(getattr(spec, "risk_default", None),
+                       self._floor_highwater.get(worker))
+        if hw is not None:
+            self._floor_highwater[worker] = hw
 
     def remove_spec(self, worker: str) -> None:
         self._inner.remove_spec(worker)
@@ -147,8 +176,8 @@ class RiskAwareToolPool:
         owns knowledge of the inner client pool's shape."""
         await self._inner.connect(worker, timeout=timeout)
 
-    async def disconnect(self, worker: str) -> None:
-        await self._inner.disconnect(worker)
+    async def disconnect(self, worker: str, timeout: float | None = None) -> None:
+        await self._inner.disconnect(worker, timeout=timeout)
 
     def record_session_approval(self, worker: str, tool: str, generation: int) -> None:
         """Record only if the worker has not been reloaded since the approval
@@ -170,6 +199,21 @@ class RiskAwareToolPool:
         spec = self.spec_for(worker)
         wire_tier = self._tool_tiers.get((worker, tool))
         declared, tier_source = resolve_declared_tier(spec, wire_tier)
+        if tier_source == "unknown_worker":
+            return declared, tier_source
+        self._record_floor(worker, spec)
+        # Floor ratchet, applied to EVERY kind including external_mcp: it is
+        # derived from the operator's own workers.yaml, not from anything the
+        # worker advertised, so honoring it does not breach the external_mcp
+        # "floor only" contract -- and skipping it would leave a kind flipped
+        # internal -> external_mcp across a reload as a downgrade channel of
+        # its own (deferred item D6).
+        floor_high = self._floor_highwater.get(worker)
+        if (floor_high is not None
+                and _TIER_ORDER.get(floor_high, -1) > _TIER_ORDER.get(declared, -1)):
+            declared = floor_high
+            if tier_source != "invalid_advertised":
+                tier_source = "floor"
         if spec is not None and spec.kind == "external_mcp":
             # external_mcp: floor only. Per-tool wire tiers are not honored
             # (risk.py:46, risk.py:53, risk.py:67-68) -- and neither is the
@@ -177,9 +221,15 @@ class RiskAwareToolPool:
             # would leak back in through the escalation below.
             return declared, tier_source
         high = self._tier_highwater.get((worker, tool))
-        if (tier_source != "unknown_worker" and high is not None
+        if (high is not None
                 and _TIER_ORDER.get(high, -1) > _TIER_ORDER.get(declared, -1)):
-            declared, tier_source = high, "wire"
+            declared = high
+            # "invalid_advertised" survives the escalation: overwriting it with
+            # "wire" erased the only record that the worker sent a malformed
+            # tier (a contract violation / tampering signal). Escalation was
+            # always correct here; the forensics were what degraded.
+            if tier_source != "invalid_advertised":
+                tier_source = "wire"
         return declared, tier_source
 
     def resolve_effective(self, worker: str, tool: str) -> str:
@@ -212,7 +262,12 @@ class RiskAwareToolPool:
                 continue
             try:
                 meta = getattr(tool, "meta", None) or {}
-                tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else None
+                # A non-dict meta container is recorded AS IS rather than
+                # normalized to None: resolve_declared_tier maps any non-str,
+                # non-None advertised value to "invalid_advertised", whereas
+                # None records as "floor" -- indistinguishable in the audit log
+                # from an honest non-advertiser.
+                tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else meta
                 self._tool_tiers[(worker, name)] = tier
                 hw = _max_tier(tier, self._tier_highwater.get((worker, name)))
                 if hw is not None:
@@ -230,6 +285,12 @@ class RiskAwareToolPool:
         return result
 
     async def close_all(self) -> None:
+        """SHUTDOWN ONLY. Bumps every generation (evicting session approvals)
+        and tears the inner pool down, but knows nothing about WorkerManager:
+        calling it directly leaves `WorkerManager._loaded` stale, so `status()`
+        goes on reporting loaded workers whose connections are closed. Runtime
+        teardown belongs at `WorkerManager.unload`/`close_all`.
+        """
         # Union, not `or`: `or` short-circuits on the first truthy operand, so
         # once ANY worker has ever been reloaded (`_generations` non-empty),
         # every never-reloaded worker in `_inner.names()` would be skipped and
@@ -269,7 +330,7 @@ class RiskAwareToolPool:
 
         result = await self._execute_and_audit(
             worker, tool, arguments, snapshot, declared, effective, gate_override,
-            session_note, tier_source,
+            session_note, tier_source, generation=gen,
         )
         if self._capture is not None:
             # Route ALL executed results through the capture layer — including
@@ -340,8 +401,24 @@ class RiskAwareToolPool:
         return None  # approved -> proceed
 
     async def _execute_and_audit(self, worker, tool, arguments, snapshot, declared, effective, gate_override, session_note,
-                                 tier_source=None):
+                                 tier_source=None, generation=None):
         start = time.monotonic()
+        if generation is not None and generation != self.generation(worker):
+            # The generation check at the end of _await_operator is not enough
+            # on its own: it holds only because the path from there to
+            # self._inner.call_tool happens to contain no await that yields.
+            # Insert one anywhere on that path -- a capture hook, a dispatch
+            # semaphore, a rate limiter -- and a reload landing in the new
+            # window dispatches an operator-approved high/critical call against
+            # a DIFFERENT subprocess, which is the exact hole the generation
+            # counter exists to close. Re-checking here removes the reliance on
+            # that accident rather than documenting it.
+            self._emit(worker, tool, snapshot, declared, effective, 0,
+                       "error", gate_override,
+                       "worker reloaded between approval and dispatch", tier_source)
+            return _ErrorResult(
+                f"{worker} was reloaded before {tool} could be dispatched; "
+                f"re-issue the call")
         try:
             result = await self._inner.call_tool(worker, tool, arguments)
         except asyncio.CancelledError:

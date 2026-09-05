@@ -134,14 +134,18 @@ async def test_unload_of_a_slow_close_yields_disconnect_timeout(
     res = await mgr.unload("stub")
     assert not res.ok
     assert res.error_kind == "disconnect_timeout"
-    assert not owner.done(), "the owner (and its slow close()) must survive unload()'s timeout"
 
-    # The owner is still parked inside the monkeypatched close(), never
-    # cancelled -- clean it up directly rather than leave it running for the
-    # rest of the session.
-    owner.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await owner
+    # Production owes this cleanup, not the test. This assertion used to read
+    # `assert not owner.done()` and the test then hand-cancelled the owner --
+    # i.e. it PINNED the orphan that spec section 7's mandated hard-kill
+    # exists to prevent. The pool now abandons the wedged owner: its recorded
+    # child pid is SIGKILLed and the task is cancelled, while staying
+    # reachable in inner._orphans until it unwinds.
+    for _ in range(100):
+        if owner.done():
+            break
+        await asyncio.sleep(0.05)
+    assert owner.done(), "the wedged owner was abandoned without being cancelled"
 
 
 async def test_unload_from_a_different_task(tmp_path, stdio_stub_spec):
