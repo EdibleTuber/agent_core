@@ -35,3 +35,21 @@ def test_tool_with_meta_but_no_tier_key_fails():
 def test_tool_with_invalid_tier_value_fails():
     with pytest.raises(AssertionError, match="risk_tier"):
         _assert_valid_risk_tier_meta(_Tool("t", {RISK_TIER_META_KEY: "LOW"}))
+
+
+def test_the_meta_key_agrees_with_the_worker_kits():
+    """The other half of the pare-worker-kit cross-check.
+
+    RISK_TIER_META_KEY is a WIRE constant: the daemon reads it out of _meta
+    that a worker on another machine wrote. Both packages state the literal
+    because they are installed separately -- often on different hardware --
+    and this test is what keeps the two statements the same. If it fails, a
+    worker's advertised tiers stop being read and every tool silently
+    resolves at its floor: safe, but silent, which is the bad kind.
+    """
+    import pytest
+    kit_risk = pytest.importorskip(
+        "pare_worker_kit.risk",
+        reason="pare-worker-kit is not installed here; the worker-side half "
+               "of this check runs in that package's own suite")
+    assert kit_risk.RISK_TIER_META_KEY == RISK_TIER_META_KEY
