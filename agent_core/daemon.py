@@ -7,6 +7,7 @@ logic; the daemon does not.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from agent_core.agent import Agent, HandlerContext
@@ -46,19 +47,39 @@ class Daemon:
         self._chat_tasks: dict[str, asyncio.Task] = {}
 
     async def serve(self) -> None:
-        """Bind the socket and accept connections forever."""
+        """Bind the socket, run agent startup, then accept connections."""
         socket_path = self.agent.config.socket_path
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         if socket_path.exists():
             socket_path.unlink()
+        # start_serving=False: the socket file exists immediately after
+        # bind(), but sock.listen() is deferred until serve_forever() runs
+        # below -- i.e. strictly after astartup() returns. A client that
+        # connects while astartup() is still running gets ECONNREFUSED
+        # (verified empirically; AF_UNIX does not queue pre-listen()
+        # connects), rather than being silently queued and serviced against
+        # a half-populated tool executor.
         server = await asyncio.start_unix_server(
             self._handle_connection,
             path=str(socket_path),
             limit=STREAM_BUFFER_LIMIT,
+            start_serving=False,
         )
+        try:
+            await self.agent.astartup()
+        except Exception:
+            # A raising astartup would exit the process, and systemd's
+            # Restart=on-failure would respawn it every RestartSec, spawning
+            # worker subprocesses each cycle. Log and serve degraded instead.
+            logger.exception("agent %s astartup failed; serving degraded",
+                             self.agent.name)
         logger.info("agent %s listening on %s", self.agent.name, socket_path)
-        async with server:
-            await server.serve_forever()
+        try:
+            async with server:
+                await server.serve_forever()
+        finally:
+            with contextlib.suppress(Exception):
+                await self.agent.ashutdown()
 
     async def _handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
