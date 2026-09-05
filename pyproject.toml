@@ -15,7 +15,7 @@ dependencies = [
     "trafilatura>=1.12.0",
     "markitdown[pdf,docx,pptx,xlsx]>=0.1.0",
     "pydantic>=2.0",
-    "mcp>=1.27.0",
+    "mcp>=1.27.0,<2",   # 2.0 renamed streamablehttp_client -> streamable_http_client
 ]
 
 [project.optional-dependencies]
@@ -27,7 +27,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "uvicorn[standard]>=0.29.0",
     "starlette>=0.37.0",
-    "fastmcp>=0.2.0",
+    "fastmcp>=2.11,<2.12",   # 2.12+ imports IdentityAssertionParams, absent from mcp 1.x
 ]
 
 [tool.pytest.ini_options]
