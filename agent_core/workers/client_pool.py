@@ -47,6 +47,68 @@ call that ignores cancellation) can make the cleanup that follows a timeout
 hang forever. Best-effort — see the module docstring."""
 
 
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """Flatten an ExceptionGroup to the exceptions that actually happened."""
+    if isinstance(exc, BaseExceptionGroup):
+        out: list[BaseException] = []
+        for sub in exc.exceptions:
+            out.extend(_leaves(sub))
+        return out
+    return [exc]
+
+
+def describe_failure(exc: BaseException) -> str:
+    """A one-line cause an operator can act on.
+
+    The SDK's transports run inside anyio task groups, so a refused connection
+    reaches us as a BaseExceptionGroup whose members are mostly CancelledError
+    -- the siblings the group cancelled -- with the real ConnectError among
+    them. `repr()` of that group tells the operator nothing about which host
+    refused what, which is the only thing they need to know. So: flatten,
+    drop the cancellations UNLESS that is all there is, and if a leaf carries
+    no message of its own, borrow its cause's.
+    """
+    leaves = _leaves(exc)
+    real = [e for e in leaves if not isinstance(e, asyncio.CancelledError)]
+    parts: list[str] = []
+    for e in (real or leaves):
+        text = str(e).strip()
+        cause = e.__cause__ or e.__context__
+        if not text and cause is not None:
+            text = str(cause).strip()
+        parts.append(f"{type(e).__name__}: {text}" if text else type(e).__name__)
+    # dict.fromkeys: an ExceptionGroup routinely repeats one identical cause
+    # once per cancelled sibling, and five copies is not more informative.
+    return "; ".join(dict.fromkeys(parts))
+
+
+def teardown_cause(worker: str, target: str,
+                   close_exc: BaseException) -> ConnectionError | None:
+    """The real reason a connect failed, recovered from the TEARDOWN.
+
+    An unreachable Streamable-HTTP endpoint does not fail inside initialize().
+    The SDK runs its transport in an anyio task group; when the POST dies the
+    group cancels the caller, so initialize() raises a bare CancelledError
+    carrying a cancel-scope address and nothing else. The httpx.ConnectError
+    that actually happened only surfaces when the transport scope unwinds --
+    which happens inside close(), on the failure path, where it was being
+    suppressed. Both halves were discarded, and the operator got
+    "cancelled internally: CancelledError('Cancelled via cancel scope 0x...')"
+    with the endpoint nowhere in it.
+
+    Returns None when close() raised nothing better than cancellations, in
+    which case the original error stands.
+    """
+    if not any(not isinstance(e, asyncio.CancelledError)
+               for e in _leaves(close_exc)):
+        return None
+    err = ConnectionError(
+        f"connecting to worker {worker!r} at {target} failed: "
+        f"{describe_failure(close_exc)}")
+    err.__cause__ = close_exc
+    return err
+
+
 class MCPClientPool:
     """Holds one MCPClient per worker name, each owned by its own task."""
 
@@ -101,6 +163,20 @@ class MCPClientPool:
         frame = getattr(gen, "ag_frame", None)
         proc = frame.f_locals.get("process") if frame is not None else None
         return getattr(proc, "pid", None)
+
+    def target(self, worker: str) -> str:
+        """What this worker's connection actually points at, for error text.
+
+        Without it, "connecting to worker 'frida' failed" names the only thing
+        the operator already knew. With three machines in play the endpoint is
+        the whole diagnosis.
+        """
+        spec = self._specs.get(worker)
+        if spec is None:
+            return worker
+        if spec.transport == "stdio":
+            return " ".join([spec.command or "", *spec.args]).strip() or worker
+        return spec.endpoint or worker
 
     def _owner_pid(self, worker: str) -> int | None:
         """The stdio child's pid, for tests and for hard-kill on a wedged close.
@@ -197,8 +273,17 @@ class MCPClientPool:
             # same task, or a cancelled/failed connect leaks the subprocess
             # exactly like the bug this pool exists to fix.
             if client is not None:
-                with contextlib.suppress(BaseException):
+                try:
                     await client.close()
+                except BaseException as close_exc:
+                    # Best-effort enrichment, never a new failure mode: if
+                    # close() carried the real cause, upgrade the recorded
+                    # error; otherwise leave it exactly as it was. connect()
+                    # re-reads _errors after reaping this task, so the upgrade
+                    # is visible to it.
+                    better = teardown_cause(worker, self.target(worker), close_exc)
+                    if better is not None:
+                        self._errors[worker] = better
             raise
         self._clients[worker] = client
         self._ready[worker].set()
@@ -251,8 +336,7 @@ class MCPClientPool:
                 with contextlib.suppress(Exception):
                     await self._cancel_owner(worker)
                 raise
-            exc = self._errors.get(worker)
-            if exc is not None:
+            if self._errors.get(worker) is not None:
                 # BOUNDED, and it must be: this runs while still holding
                 # self._locks[worker]. The owner reached here by failing
                 # connect()/initialize(), and _own's failure path then awaits
@@ -264,6 +348,13 @@ class MCPClientPool:
                 # is strictly worse and is the outcome Critical 3 exists to
                 # prevent.
                 await self._reap(worker, timeout=DEFAULT_OWNER_JOIN_TIMEOUT)
+                # Re-read AFTER the reap: _own's teardown is where an
+                # unreachable HTTP endpoint's real cause appears, and it
+                # rewrites _errors as it unwinds. If the reap timed out, this
+                # is simply the original error, unchanged.
+                exc = self._errors.get(worker)
+                if exc is None:                       # pragma: no cover
+                    return
                 if isinstance(exc, asyncio.CancelledError):
                     # Reaching here means _ready was observed set *before*
                     # wait_for's timeout fired, so this is not our own
@@ -280,8 +371,20 @@ class MCPClientPool:
                     # at the `await asyncio.wait_for(...)` above, and is
                     # untouched by this branch.
                     raise ConnectionError(
-                        f"connecting to worker {worker!r} failed "
-                        f"(cancelled internally: {exc!r})"
+                        f"connecting to worker {worker!r} at "
+                        f"{self.target(worker)} failed: "
+                        f"{describe_failure(exc)}"
+                    ) from exc
+                if isinstance(exc, BaseExceptionGroup):
+                    # Same reasoning as the CancelledError branch above, for
+                    # the same reason: an ExceptionGroup's repr buries the one
+                    # cause that matters, and a BaseExceptionGroup carrying a
+                    # CancelledError is a BaseException that would escape the
+                    # caller's `except Exception`.
+                    raise ConnectionError(
+                        f"connecting to worker {worker!r} at "
+                        f"{self.target(worker)} failed: "
+                        f"{describe_failure(exc)}"
                     ) from exc
                 raise exc
 
