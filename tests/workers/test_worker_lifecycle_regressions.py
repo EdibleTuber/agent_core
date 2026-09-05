@@ -429,3 +429,120 @@ async def test_highwater_escalation_preserves_invalid_advertised(tmp_path):
     declared, source = pool._resolve_declared("w", "t")
     assert declared == "high"
     assert source == "invalid_advertised"
+
+
+# --- FOLLOW-UP 1: close_all must stay bounded behind connect()'s lock -----
+
+
+async def test_close_all_is_bounded_when_a_failed_connect_wedges_in_close(
+        tmp_path, stdio_stub_spec, monkeypatch):
+    """`connect()`'s error path reaps the owner WHILE HOLDING the per-worker
+    lock, so that reap must be bounded too.
+
+    Sequence: connect() spawns the child, initialize() refuses, and _own's
+    failure path wedges in client.close(). connect() then joins the owner --
+    inside `async with self._locks[worker]`. With that join unbounded, the
+    lock is held forever, and close_all()'s own DEFAULT_OWNER_JOIN_TIMEOUT is
+    never reached because its disconnect() blocks acquiring that same lock:
+    shutdown hangs, which is worse than the orphan-leak it replaced.
+
+    (Before the fix that popped `_owners` early, close_all() iterated nothing
+    here and returned instantly, leaking the orphan instead of hanging.)
+    """
+    seen_pids: list = []
+    orig_connect = MCPClient.connect
+
+    async def _connect_then_record(self):
+        await orig_connect(self)
+        seen_pids.append(MCPClientPool._pid_of(self))
+
+    async def _refuse_initialize(self):
+        raise RuntimeError("initialize refused")
+
+    monkeypatch.setattr(MCPClient, "connect", _connect_then_record)
+    monkeypatch.setattr(MCPClient, "initialize", _refuse_initialize)
+    monkeypatch.setattr(MCPClient, "close", _slow_close)
+    monkeypatch.setattr(client_pool_mod, "DEFAULT_OWNER_JOIN_TIMEOUT", 0.3)
+
+    mgr, pool, ex, inner = _manager(tmp_path, [stdio_stub_spec("stub", "low")])
+    load = asyncio.create_task(mgr.load("stub"))
+    # Long enough for connect() to reach its error-path reap and (pre-fix)
+    # wedge there holding the lock.
+    await asyncio.sleep(0.6)
+
+    await asyncio.wait_for(mgr.close_all(), timeout=5)
+
+    res = await asyncio.wait_for(load, timeout=5)
+    assert not res.ok
+    assert seen_pids and seen_pids[0] is not None
+    for _ in range(50):
+        if not _pid_alive(seen_pids[0]):
+            break
+        await asyncio.sleep(0.05)
+    assert not _pid_alive(seen_pids[0]), (
+        "the child of a failed connect whose close wedged was never killed")
+
+
+# --- FOLLOW-UP 2: the floor ratchet must be seeded by the constructor ----
+
+
+async def test_constructor_seeded_floor_cannot_be_lowered_later(tmp_path):
+    """`__init__` registered its specs with a bare `inner.add_spec`, so the
+    floor ratchet only learned a constructor-supplied worker's floor lazily,
+    on the first `_resolve_declared`. A worker never dispatched to and never
+    loaded through the manager could therefore still have its floor lowered
+    by `registry.add(...)` + `/worker load|reload`."""
+    spec = WorkerSpec(name="w", transport="stdio", risk_default="high",
+                      command="/bin/true")
+    inner = MCPClientPool([])
+    pool = RiskAwareToolPool(
+        inner=inner, specs={"w": spec}, risk_gate=RiskGate(overrides=[]),
+        approval_registry=ToolApprovalRegistry(), audit_log=AuditLog(tmp_path))
+    # Never dispatched to, never resolved -- straight to a lowered re-add.
+    pool.add_spec(spec.model_copy(update={"risk_default": "low"}))
+    assert pool.resolve_effective("w", "t") == "high", (
+        "a constructor-supplied worker's floor was lowered by a later add_spec")
+
+
+# --- FOLLOW-UP 3: the SIGKILL must not be able to hit anything else ------
+
+
+def test_kill_pid_refuses_an_implausible_pid():
+    """The pid comes out of an SDK generator's frame locals. A non-int raises
+    TypeError past _kill_pid's handlers and out of _abandon(); a 0 signals the
+    daemon's whole process group, daemon included.
+
+    NOTE: the pid=0 case below is deliberately NOT run against the pre-fix
+    code -- it would SIGKILL the test runner's own process group. Only the
+    non-int case (pre-fix: TypeError) was executed against the old commit.
+    """
+    pool = MCPClientPool([])
+    assert pool._kill_pid("w", None) is False
+    assert pool._kill_pid("w", "1234") is False
+    assert pool._kill_pid("w", 3.5) is False
+    assert pool._kill_pid("w", True) is False
+    assert pool._kill_pid("w", 0) is False
+    assert pool._kill_pid("w", -1) is False
+    assert pool._kill_pid("w", 1) is False
+
+
+async def test_close_all_does_not_kill_a_pid_of_an_already_finished_orphan(
+        tmp_path, stdio_stub_spec, monkeypatch):
+    """An orphan entry outlives its task by one loop iteration (its removal is
+    a call_soon done-callback). A done() owner has finished client.close(), so
+    anyio already reaped the child and the OS may have reused that pid --
+    killing it in the sweep would signal an unrelated process."""
+    killed: list = []
+    inner = MCPClientPool([])
+    monkeypatch.setattr(MCPClientPool, "_kill_pid",
+                        lambda self, worker, pid: killed.append(pid) or False)
+
+    async def _noop():
+        return None
+
+    done_task = asyncio.get_running_loop().create_task(_noop())
+    await done_task
+    inner._orphans[done_task] = ("ghost", 4242)
+
+    await inner.close_all()
+    assert killed == [], "close_all killed the pid of an already-finished orphan"
