@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -25,6 +26,8 @@ from agent_core.workers.tool_approval import (
 )
 from agent_core.workers.types import AuditEntry, WorkerSpec
 
+logger = logging.getLogger(__name__)
+
 SendMessage = Callable[[Any], Awaitable[None]]
 
 _TIER_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -33,7 +36,7 @@ _TIER_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 def _max_tier(a: str | None, b: str | None) -> str | None:
     """The higher of two tiers; None if neither is a recognized tier string.
 
-    Inputs may be hostile/arbitrary (dict, list, bool, ...) — risk.py:57-59
+    Inputs may be hostile/arbitrary (dict, list, bool, ...) — risk.py:59-61
     documents this for the wire tier specifically, and it applies equally to
     anything read from `_tool_tiers`/`_tier_highwater`. The isinstance guard
     must run before the `in` membership test, since `_TIER_ORDER` is a dict
@@ -148,13 +151,32 @@ class RiskAwareToolPool:
     def is_session_approved(self, worker: str, tool: str) -> bool:
         return (worker, tool, self.generation(worker)) in self._session_approved
 
+    def _resolve_declared(self, worker: str, tool: str) -> tuple[str, str | None]:
+        """Single source of truth for (declared_tier, tier_source): the ONE
+        place the wire tier, the high-water mark, and the external_mcp
+        floor-only contract are reconciled. `call_tool` and `resolve_effective`
+        both call this rather than each recomputing it -- they drifted once
+        already (spec 6.4.3) by being two implementations of one rule.
+        """
+        spec = self.spec_for(worker)
+        wire_tier = self._tool_tiers.get((worker, tool))
+        declared, tier_source = resolve_declared_tier(spec, wire_tier)
+        if spec is not None and spec.kind == "external_mcp":
+            # external_mcp: floor only. Per-tool wire tiers are not honored
+            # (risk.py:46, risk.py:53, risk.py:67-68) -- and neither is the
+            # high-water mark derived from them, or the floor-only contract
+            # would leak back in through the escalation below.
+            return declared, tier_source
+        high = self._tier_highwater.get((worker, tool))
+        if (tier_source != "unknown_worker" and high is not None
+                and _TIER_ORDER.get(high, -1) > _TIER_ORDER.get(declared, -1)):
+            declared, tier_source = high, "wire"
+        return declared, tier_source
+
     def resolve_effective(self, worker: str, tool: str) -> str:
         """The tier a dispatch would resolve to right now. Extracted so tests
         and the tier-ratchet check can ask without dispatching."""
-        advertised = self._tool_tiers.get((worker, tool))
-        high = self._tier_highwater.get((worker, tool))
-        declared, _ = resolve_declared_tier(self.spec_for(worker),
-                                            _max_tier(advertised, high))
+        declared, _ = self._resolve_declared(worker, tool)
         return self._gate.evaluate(worker=worker, tool=tool,
                                    declared_tier=declared).effective_tier
 
@@ -191,7 +213,11 @@ class RiskAwareToolPool:
                 # malformed/hostile per-tool entry (bad meta shape, unhashable
                 # tier value, ...): one bad entry must not abort discovery of
                 # this worker's remaining tools, nor of tools already recorded.
-                continue
+                # Logged (not silent) so a vanishing tool leaves a trace.
+                logger.warning(
+                    "worker %r: malformed tool entry during discovery (tool=%r), skipped",
+                    worker, name,
+                )
         return result
 
     async def close_all(self) -> None:
@@ -211,21 +237,9 @@ class RiskAwareToolPool:
         # FLOOR (risk.py:75-78) -- not a fail-safe to high. Safety for
         # dangerous tools that fail to advertise comes from operator pins plus
         # the session high-water mark below, never from a dispatch-time
-        # fallback.
-        spec = self.spec_for(worker)
-        # Resolve against THIS dispatch's raw wire tier first, so
-        # resolve_declared_tier can still classify a malformed value as
-        # "invalid_advertised" (a tampering signal, risk.py:57-59) rather than
-        # having it silently collapse to "floor" -- which is what pre-combining
-        # via _max_tier before this call would do, since _max_tier only ever
-        # returns a recognized tier or None. The high-water mark then escalates
-        # on top, without erasing that provenance unless it actually applies.
-        wire_tier = self._tool_tiers.get((worker, tool))
-        declared, tier_source = resolve_declared_tier(spec, wire_tier)
-        high = self._tier_highwater.get((worker, tool))
-        if (tier_source != "unknown_worker" and high is not None
-                and _TIER_ORDER.get(high, -1) > _TIER_ORDER.get(declared, -1)):
-            declared, tier_source = high, "wire"
+        # fallback. declared/tier_source come from _resolve_declared, the same
+        # single resolution path resolve_effective uses -- see its docstring.
+        declared, tier_source = self._resolve_declared(worker, tool)
         gen = self.generation(worker)
         decision = self._gate.evaluate(worker=worker, tool=tool, declared_tier=declared)
         effective = decision.effective_tier
