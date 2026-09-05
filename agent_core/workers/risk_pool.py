@@ -7,6 +7,7 @@ straight through (discovery is read-only and ungated).
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import time
@@ -25,6 +26,14 @@ from agent_core.workers.tool_approval import (
 from agent_core.workers.types import AuditEntry, WorkerSpec
 
 SendMessage = Callable[[Any], Awaitable[None]]
+
+_TIER_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def _max_tier(a: str | None, b: str | None) -> str | None:
+    """The higher of two tiers; None only if both are None/unknown."""
+    known = [t for t in (a, b) if t in _TIER_ORDER]
+    return max(known, key=lambda t: _TIER_ORDER[t]) if known else None
 
 
 class _ErrorResult:
@@ -79,14 +88,80 @@ class RiskAwareToolPool:
         capture_layer: "CaptureLayer | None" = None,
     ) -> None:
         self._inner = inner
-        self._specs = specs
+        for spec in (specs or {}).values():
+            inner.add_spec(spec)
         self._gate = risk_gate
         self._registry = approval_registry
         self._audit = audit_log
         self._send = send_message
         self._capture = capture_layer
-        self._session_approved: set[tuple[str, str]] = set()
+        # (worker, tool, generation) — an approval is scoped to the exact worker
+        # instance it was granted against.
+        self._session_approved: set[tuple[str, str, int]] = set()
         self._tool_tiers: dict[tuple[str, str], str | None] = {}
+        # Highest tier ever observed for a tool this session. NEVER evicted:
+        # escalate-only must be monotonic across time, not just within one
+        # resolution, or a reload becomes a downgrade channel (spec 6.4.1).
+        self._tier_highwater: dict[tuple[str, str], str] = {}
+        self._generations: dict[str, int] = {}
+
+    # --- lifecycle ---------------------------------------------------------
+    def spec_for(self, worker: str):
+        """Read through to the inner pool — one source of truth for specs."""
+        return self._inner.spec(worker)
+
+    def generation(self, worker: str) -> int:
+        return self._generations.get(worker, 0)
+
+    def _bump(self, worker: str) -> None:
+        self._generations[worker] = self.generation(worker) + 1
+        self._session_approved = {
+            e for e in self._session_approved if e[0] != worker
+        }
+        self._tool_tiers = {
+            k: v for k, v in self._tool_tiers.items() if k[0] != worker
+        }
+        # _tier_highwater is deliberately NOT cleared.
+
+    def add_spec(self, spec) -> None:
+        self._inner.add_spec(spec)
+        self._bump(spec.name)
+
+    def remove_spec(self, worker: str) -> None:
+        self._inner.remove_spec(worker)
+        self._bump(worker)
+
+    def record_session_approval(self, worker: str, tool: str, generation: int) -> None:
+        """Record only if the worker has not been reloaded since the approval
+        was requested. An operator answering a prompt after a reload must not
+        pre-approve the new process."""
+        if generation == self.generation(worker):
+            self._session_approved.add((worker, tool, generation))
+
+    def is_session_approved(self, worker: str, tool: str) -> bool:
+        return (worker, tool, self.generation(worker)) in self._session_approved
+
+    def resolve_effective(self, worker: str, tool: str) -> str:
+        """The tier a dispatch would resolve to right now. Extracted so tests
+        and the tier-ratchet check can ask without dispatching."""
+        advertised = self._tool_tiers.get((worker, tool))
+        high = self._tier_highwater.get((worker, tool))
+        declared, _ = resolve_declared_tier(self.spec_for(worker),
+                                            _max_tier(advertised, high))
+        return self._gate.evaluate(worker=worker, tool=tool,
+                                   declared_tier=declared).effective_tier
+
+    def emit_lifecycle(self, worker: str, action: str, detail: str | None = None,
+                       args: dict | None = None) -> None:
+        """Control-plane audit row. Load/unload changes the enforcement config
+        itself, which is the first thing an audit log exists for."""
+        self._audit.append(AuditEntry(
+            request_id=uuid.uuid4().hex, worker=worker, tool=None,
+            args=args or {}, declared_tier="low", effective_tier="low",
+            override_reason=None, detail=detail, outcome=action,
+            latency_ms=0, session_guid="pending", worker_contract_version=1,
+            tier_source=None,
+        ))
 
     # --- ungated proxies -------------------------------------------------
     async def list_tools(self, worker: str):
@@ -100,33 +175,42 @@ class RiskAwareToolPool:
             meta = getattr(tool, "meta", None) or {}
             tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else None
             self._tool_tiers[(worker, name)] = tier
+            hw = _max_tier(tier, self._tier_highwater.get((worker, name)))
+            if hw is not None:
+                self._tier_highwater[(worker, name)] = hw
         return result
 
     async def close_all(self) -> None:
+        for worker in list(self._generations) or self._inner.names():
+            self._bump(worker)
         await self._inner.close_all()
 
     # --- gated dispatch --------------------------------------------------
     async def call_tool(self, worker: str, tool: str, arguments: dict[str, Any], ctx: Any = None,
                         capture: bool = True):
         snapshot = copy.deepcopy(arguments) if isinstance(arguments, dict) else {}
-        spec = self._specs.get(worker)
-        # A tool we never saw in discovery is treated as "no advertised tier"
-        # (None) -> resolve_declared_tier fails safe to "high" for internal workers.
-        advertised = self._tool_tiers.get((worker, tool))
+        # A tool with no advertised tier resolves to the worker's risk_default
+        # FLOOR (risk.py:68) -- not a fail-safe to high. Safety for dangerous
+        # tools that fail to advertise comes from operator pins plus the
+        # session high-water mark below, never from a dispatch-time fallback.
+        spec = self.spec_for(worker)
+        advertised = _max_tier(self._tool_tiers.get((worker, tool)),
+                               self._tier_highwater.get((worker, tool)))
         declared, tier_source = resolve_declared_tier(spec, advertised)
+        gen = self.generation(worker)
         decision = self._gate.evaluate(worker=worker, tool=tool, declared_tier=declared)
         effective = decision.effective_tier
         gate_override = decision.override_reason  # why escalated (None if declared==effective)
 
         session_note: str | None = None
         if effective in ("high", "critical"):
-            if effective != "critical" and (worker, tool) in self._session_approved:
+            if effective != "critical" and self.is_session_approved(worker, tool):
                 session_note = "session-approved"
             else:
                 send = self._resolve_send(ctx)
                 blocked = await self._await_operator(
                     worker, tool, snapshot, declared, effective, gate_override, send,
-                    tier_source,
+                    tier_source, gen,
                 )
                 if blocked is not None:  # denied / undeliverable / timeout
                     return blocked
@@ -154,7 +238,7 @@ class RiskAwareToolPool:
         return self._send
 
     async def _await_operator(self, worker, tool, snapshot, declared, effective, gate_override, send,
-                              tier_source=None):
+                              tier_source=None, generation=0):
         """Returns an _ErrorResult if the call should NOT proceed, else None."""
         from agent_core.protocol.messages import ToolApprovalRequestMessage
 
@@ -197,7 +281,10 @@ class RiskAwareToolPool:
             return _ErrorResult(f"{worker}.{tool} denied by operator: {decision.justification or 'no reason given'}")
 
         if decision.scope == "session" and effective != "critical":
-            self._session_approved.add((worker, tool))
+            self.record_session_approval(worker, tool, generation)
+        if generation != self.generation(worker):
+            return _ErrorResult(
+                f"{worker} was reloaded while approval was pending; re-issue the call")
         return None  # approved -> proceed
 
     async def _execute_and_audit(self, worker, tool, arguments, snapshot, declared, effective, gate_override, session_note,
@@ -205,6 +292,12 @@ class RiskAwareToolPool:
         start = time.monotonic()
         try:
             result = await self._inner.call_tool(worker, tool, arguments)
+        except asyncio.CancelledError:
+            self._emit(worker, tool, snapshot, declared, effective,
+                       int((time.monotonic() - start) * 1000),
+                       "cancelled", gate_override, "worker disconnected mid-dispatch",
+                       tier_source)
+            raise
         except Exception as exc:
             self._emit(worker, tool, snapshot, declared, effective,
                        int((time.monotonic() - start) * 1000),
