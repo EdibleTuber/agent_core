@@ -128,3 +128,92 @@ def test_names_preserves_insertion_order():
     agent = _StubAgent()
     executor = ToolExecutor.build(agent, [A, B, C])
     assert executor.names() == ["a", "b", "c"]
+
+
+class _FakeAgent:
+    pass
+
+
+def _worker_tool(name, worker):
+    from agent_core.tools.base import Tool
+
+    class _T(Tool):
+        pass
+    _T.name = name
+    _T.description = "d"
+    _T.parameters = {"type": "object", "properties": {}}
+    _T.worker = worker
+    return _T
+
+
+def test_add_and_remove_worker_tools():
+    from agent_core.tools.executor import ToolExecutor
+    ex = ToolExecutor.build(_FakeAgent(), [])
+    before = set(ex.names())
+
+    ex.add(_worker_tool("frida_attach", "frida"))
+    ex.add(_worker_tool("frida_detach", "frida"))
+    ex.add(_worker_tool("static_load_apk", "static"))
+    assert "frida_attach" in ex
+
+    removed = ex.remove_worker("frida")
+    assert removed == 2
+    assert "frida_attach" not in ex
+    assert "static_load_apk" in ex
+
+    ex.remove_worker("static")
+    assert set(ex.names()) == before, "builtins must be untouched"
+
+
+def test_add_refuses_to_shadow_an_existing_tool():
+    """build() is last-write-wins and silent; add() must not be.
+
+    PARE's StaticAnalyze is named "static_analyze"; if the static worker ever
+    ships a tool called "analyze" the synthesized name collides exactly.
+    """
+    from agent_core.tools.executor import ToolExecutor
+    ex = ToolExecutor.build(_FakeAgent(), [_worker_tool("static_analyze", None)])
+    with pytest.raises(ValueError, match="static_analyze"):
+        ex.add(_worker_tool("static_analyze", "static"))
+    assert ex.names().count("static_analyze") == 1
+
+
+def test_add_all_is_atomic():
+    from agent_core.tools.executor import ToolExecutor
+    ex = ToolExecutor.build(_FakeAgent(), [_worker_tool("static_analyze", None)])
+    batch = [_worker_tool("static_load_apk", "static"),
+             _worker_tool("static_analyze", "static")]   # second one collides
+    with pytest.raises(ValueError):
+        ex.add_all(batch)
+    assert "static_load_apk" not in ex, "a rejected batch must add nothing"
+
+
+def test_add_validates_requires():
+    from agent_core.tools.executor import ToolExecutor
+    ex = ToolExecutor.build(_FakeAgent(), [])
+    cls = _worker_tool("needs_thing", "w")
+    cls.requires = ("nonexistent_manager",)
+    with pytest.raises(RuntimeError, match="nonexistent_manager"):
+        ex.add(cls)
+
+
+def test_add_honours_disabled():
+    from agent_core.tools.executor import ToolExecutor
+    ex = ToolExecutor.build(_FakeAgent(), [], disabled=frozenset({"frida_attach"}))
+    ex.add(_worker_tool("frida_attach", "frida"))
+    assert "frida_attach" not in ex
+
+
+def test_schemas_order_is_stable_across_mutation():
+    """schemas() is a prompt-cache prefix; dict insertion order would reshuffle
+    it on every load/unload, and load_autoload() registers concurrently."""
+    from agent_core.tools.executor import ToolExecutor
+    ex = ToolExecutor.build(_FakeAgent(), [])
+    ex.add(_worker_tool("static_load_apk", "static"))
+    ex.add(_worker_tool("frida_attach", "frida"))
+    first = [s["function"]["name"] for s in ex.schemas()]
+
+    ex2 = ToolExecutor.build(_FakeAgent(), [])
+    ex2.add(_worker_tool("frida_attach", "frida"))
+    ex2.add(_worker_tool("static_load_apk", "static"))
+    assert [s["function"]["name"] for s in ex2.schemas()] == first
