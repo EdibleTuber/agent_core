@@ -41,7 +41,12 @@ async def discover_and_register(
     for spec in specs:
         try:
             list_result = await asyncio.wait_for(pool.list_tools(spec.name), timeout=2.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as exc:
+        except asyncio.CancelledError:
+            # Never absorb a cancellation: continuing the loop inside a task
+            # that is already cancelling makes every later await re-raise, which
+            # presents as one dead worker killing its siblings' discovery.
+            raise
+        except Exception as exc:
             logger.warning(
                 "worker %s discovery failed (%s); skipping registration",
                 spec.name,

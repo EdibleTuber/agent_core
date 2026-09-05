@@ -71,6 +71,15 @@ class WorkerSpec(BaseModel):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
+    autoload: bool = True
+    """Connect this worker at daemon startup. False means declared-but-not-
+    loaded: it appears in the catalog and can be loaded at runtime.
+
+    NOTE: WorkerSpec does not set model_config, so pydantic's default
+    extra="ignore" applies — an OLDER agent_core reading a workers.yaml that
+    sets autoload: false silently drops the field and autoloads the worker
+    anyway. Consumers must bump their agent_core pin before adding the key.
+    """
 
     @field_validator("name")
     @classmethod

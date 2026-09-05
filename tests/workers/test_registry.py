@@ -75,3 +75,25 @@ def test_registry_add_appends(tmp_path):
         risk_default="medium",
     ))
     assert {w.name for w in reg.all()} == {"android", "static", "ghidra", "ios"}
+
+
+def test_autoload_defaults_true_and_parses(tmp_path):
+    """Default True keeps every existing workers.yaml behaving as it does now."""
+    from agent_core.workers.registry import WorkerRegistry
+
+    p = tmp_path / "workers.yaml"
+    p.write_text(
+        "workers:\n"
+        "  a:\n"
+        "    command: /bin/true\n"
+        "    transport: stdio\n"
+        "    risk_default: low\n"
+        "  b:\n"
+        "    command: /bin/true\n"
+        "    transport: stdio\n"
+        "    risk_default: low\n"
+        "    autoload: false\n"
+    )
+    reg = WorkerRegistry.load(p)
+    assert reg.get("a").autoload is True
+    assert reg.get("b").autoload is False
