@@ -93,6 +93,15 @@ class MCPClientPool:
         except BaseException as exc:      # includes CancelledError on timeout
             self._errors[worker] = exc
             self._ready[worker].set()
+            # connect()/initialize() may have partially entered the transport
+            # and/or session scopes (e.g. the stdio subprocess is spawned but
+            # initialize() never got a reply). MCPClient.close() null-checks
+            # both independently, so it's safe to call here even on a
+            # completely failed connect — and it MUST be called here, in this
+            # same task, or a cancelled/failed connect leaks the subprocess
+            # exactly like the bug this pool exists to fix.
+            with contextlib.suppress(BaseException):
+                await client.close()
             raise
         self._clients[worker] = client
         self._ready[worker].set()
@@ -134,6 +143,25 @@ class MCPClientPool:
             exc = self._errors.get(worker)
             if exc is not None:
                 await self._reap(worker)
+                if isinstance(exc, asyncio.CancelledError):
+                    # Reaching here means _ready was observed set *before*
+                    # wait_for's timeout fired, so this is not our own
+                    # _cancel_owner cancellation (that path returns via the
+                    # `except asyncio.TimeoutError` branch above and never
+                    # gets here) — it's a bare CancelledError the mcp SDK
+                    # raised internally (e.g. its own task-group cancelling
+                    # a sibling after a refused connection). Propagating a
+                    # BaseException here would let a single unreachable
+                    # worker cancel whichever task called connect() — e.g.
+                    # the daemon's startup task. Normalize it to a plain
+                    # Exception; the caller's own cancellation (if any) is
+                    # a completely separate CancelledError raised directly
+                    # at the `await asyncio.wait_for(...)` above, and is
+                    # untouched by this branch.
+                    raise ConnectionError(
+                        f"connecting to worker {worker!r} failed "
+                        f"(cancelled internally: {exc!r})"
+                    ) from exc
                 raise exc
 
     async def _cancel_owner(self, worker: str) -> None:
@@ -157,12 +185,24 @@ class MCPClientPool:
         self._stop.pop(worker, None)
 
     async def disconnect(self, worker: str) -> None:
-        """Stop the worker's owner task and wait for its close to finish."""
-        stop = self._stop.get(worker)
-        if stop is not None:
-            stop.set()
-        await self._reap(worker)
-        self._errors.pop(worker, None)
+        """Stop the worker's owner task and wait for its close to finish.
+
+        Takes the same per-worker lock as connect() so the two are mutually
+        exclusive: without it, a disconnect() could set the stop event out
+        from under a connect() that is still waiting on _ready (handing the
+        caller a "successful" connect to a client that's already torn down),
+        and two concurrent disconnect() calls could race each other's
+        _reap(), letting the second return before the first's close() has
+        actually finished. _reap()/_cancel_owner() do not themselves take
+        the lock, so this stays a single level of acquisition — no nesting,
+        no deadlock against connect()'s own lock usage.
+        """
+        async with self._locks[worker]:
+            stop = self._stop.get(worker)
+            if stop is not None:
+                stop.set()
+            await self._reap(worker)
+            self._errors.pop(worker, None)
 
     async def _ensure_connected(self, worker: str) -> MCPClient:
         if worker not in self._specs:
