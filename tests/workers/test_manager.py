@@ -65,8 +65,35 @@ async def test_load_registers_prefixed_tools(tmp_path, stdio_stub_spec):
 
 
 async def test_unload_removes_only_its_own_tools(tmp_path, stdio_stub_spec):
-    mgr, pool, ex, inner = _manager(tmp_path, [stdio_stub_spec("stub", "low")])
+    """A non-worker tool must survive the worker's unload.
+
+    With BUILTIN_TOOLS emptied by the autouse fixture and no agent tools
+    passed, `builtins` was previously always `set()`, so this only ever
+    asserted "the executor ends up empty" — it could not tell `remove_worker`
+    apart from a blanket `self._tools.clear()`. A sentinel non-worker tool
+    gives the baseline teeth.
+    """
+    from agent_core.tools.base import Tool
+
+    class _Keeper(Tool):
+        name = "keeper"
+        description = "a non-worker tool that must not be touched by unload"
+        parameters = {"type": "object", "properties": {}}
+
+        async def run(self, args, ctx):
+            return "kept"
+
+    reg = WorkerRegistry()
+    reg.add(stdio_stub_spec("stub", "low"))
+    inner = MCPClientPool([])
+    pool = RiskAwareToolPool(
+        inner=inner, specs={}, risk_gate=RiskGate(overrides=[]),
+        approval_registry=ToolApprovalRegistry(), audit_log=AuditLog(tmp_path))
+    ex = ToolExecutor.build(_Agent(), [_Keeper])
+    mgr = WorkerManager(reg, pool, ex)
+
     builtins = set(ex.names())
+    assert builtins == {"keeper"}
     await mgr.load("stub")
     res = await mgr.unload("stub")
     assert res.ok and res.tool_count == 2
@@ -153,6 +180,12 @@ async def test_collision_fails_the_whole_load(tmp_path, stdio_stub_spec):
     assert not res.ok and res.error_kind == "tool_collision"
     assert "stub_noop_low" in res.error
     assert "stub_risky_high" not in ex, "partial registration"
+    # The collision is only discovered after connect()+list_tools() have
+    # already succeeded, so this is the one test that drives _fail's
+    # rollback against a live subprocess. The rollback must fully undo the
+    # connect, not just the tool registration.
+    assert not inner.is_connected("stub")
+    assert inner.spec("stub") is None
 
 
 async def test_load_autoload_skips_autoload_false(tmp_path, stdio_stub_spec):
@@ -171,6 +204,15 @@ async def test_unavailable_reason(tmp_path, stdio_stub_spec):
     await mgr.load("stub")
     assert mgr.unavailable_reason("stub") is None
     assert "not declared" in mgr.unavailable_reason("ghost")
+
+
+def test_worker_of_prefers_the_longest_matching_worker_name(tmp_path, stdio_stub_spec):
+    """A worker named `x` must not claim a tool belonging to worker `x_y`."""
+    mgr, pool, ex, inner = _manager(
+        tmp_path, [stdio_stub_spec("x", "low"), stdio_stub_spec("x_y", "low")])
+    assert mgr.worker_of("x_y_z") == "x_y"
+    assert mgr.worker_of("x_z") == "x"
+    assert mgr.worker_of("nope") is None
 
 
 async def test_lifecycle_rows_are_audited(tmp_path, stdio_stub_spec):

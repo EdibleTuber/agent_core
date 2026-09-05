@@ -31,6 +31,13 @@ from agent_core.workers.types import WorkerSpec
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONNECT_TIMEOUT = 10.0
+DEFAULT_OWNER_JOIN_TIMEOUT = 5.0
+"""Bound on how long _cancel_owner waits for a cancelled owner task to unwind.
+
+Without this, connect()'s own `timeout` is not actually a wall-clock bound:
+the _ready wait is bounded, but a wedged owner task (stuck in a subprocess
+call that ignores cancellation) can make the cleanup that follows a timeout
+hang forever. Best-effort — see the module docstring."""
 
 
 class MCPClientPool:
@@ -165,18 +172,52 @@ class MCPClientPool:
                 raise exc
 
     async def _cancel_owner(self, worker: str) -> None:
+        """Cancel the owner task and wait (bounded) for it to unwind.
+
+        `suppress(BaseException)` around a bare `await task` would swallow a
+        CancelledError delivered to the CALLER of connect() (e.g. the daemon
+        shutting down) just as readily as the CancelledError that is `task`'s
+        own, expected outcome of the `task.cancel()` above — the two are
+        indistinguishable by type alone. `task.cancelled()` disambiguates:
+        it's only True once `task` itself has actually finished cancelling,
+        so a CancelledError raised here while `task.cancelled()` is still
+        False can only be this coroutine's own cancellation, which must
+        propagate. `asyncio.shield` keeps `wait_for`'s timeout-driven cleanup
+        (`_cancel_and_wait`, which unconditionally cancels whatever it was
+        awaiting) from cancelling `task` itself on the caller-cancellation
+        path, which would otherwise flip `task.cancelled()` to True and
+        defeat this exact check.
+        """
         task = self._owners.pop(worker, None)
         if task is not None:
             task.cancel()
-            with contextlib.suppress(BaseException):
-                await task
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=DEFAULT_OWNER_JOIN_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "owner task for worker %r did not unwind within %ss after "
+                    "cancel(); abandoning it (best-effort)",
+                    worker, DEFAULT_OWNER_JOIN_TIMEOUT)
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
+            except Exception:
+                pass  # the owner task's own connect/initialize failure
         self._cleanup(worker)
 
     async def _reap(self, worker: str) -> None:
+        """Wait for the owner task to finish. See _cancel_owner's docstring
+        for why a plain `except CancelledError: if not task.cancelled(): raise`
+        is required instead of `suppress(BaseException)`."""
         task = self._owners.pop(worker, None)
         if task is not None:
-            with contextlib.suppress(BaseException):
+            try:
                 await task
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
+            except Exception:
+                pass
         self._cleanup(worker)
 
     def _cleanup(self, worker: str) -> None:
@@ -223,6 +264,6 @@ class MCPClientPool:
 
     async def close_all(self) -> None:
         for worker in list(self._owners):
-            with contextlib.suppress(BaseException):
+            with contextlib.suppress(Exception):
                 await self.disconnect(worker)
         self._clients.clear()
