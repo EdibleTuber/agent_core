@@ -94,3 +94,28 @@ async def test_factory_run_handles_call_exception():
     out = await tool.run({}, MagicMock())
     assert "fail" in out.lower() or "error" in out.lower()
     assert "transport closed" in out
+
+
+def test_synthesized_tool_carries_worker_provenance():
+    """remove_worker() keys on this attribute rather than the name prefix.
+
+    Prefix matching would delete a declarative tool that merely starts with the
+    worker's name -- PARE has a live near-miss: StaticAnalyze is named
+    "static_analyze" while the `static` worker prefixes its tools "static_".
+    """
+    from agent_core.workers.tool_factory import make_tool_class
+    from agent_core.workers.types import WorkerSpec
+
+    spec = WorkerSpec(name="static", transport="stdio", risk_default="low",
+                      command="/bin/true")
+    cls = make_tool_class(spec, {"name": "grep_smali", "description": "d",
+                                 "inputSchema": {"type": "object", "properties": {}}}, None)
+    assert cls.worker == "static"
+    assert cls.name == "static_grep_smali"
+
+
+def test_builtin_tools_have_no_worker_attribute():
+    """The absence of the attribute is what makes builtins unremovable."""
+    from agent_core.tools.builtin import BUILTIN_TOOLS
+    for tool_cls in BUILTIN_TOOLS:
+        assert not hasattr(tool_cls, "worker"), tool_cls.name

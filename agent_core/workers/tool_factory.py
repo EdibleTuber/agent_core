@@ -53,6 +53,7 @@ def make_tool_class(
     _DynamicTool.name = prefixed
     _DynamicTool.description = description_str
     _DynamicTool.parameters = parameters_dict
+    _DynamicTool.worker = worker.name
     _DynamicTool.__name__ = f"DynamicTool_{prefixed}"
     _DynamicTool.__qualname__ = f"DynamicTool_{prefixed}"
 
