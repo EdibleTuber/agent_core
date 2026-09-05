@@ -26,13 +26,32 @@ class _Result:
         self.content = [_Block(text)]
 
 
-class _InnerPool:
+class _SpecBookkeeping:
+    """Minimal MCPClientPool.spec()/add_spec()/remove_spec()/names() surface,
+    since RiskAwareToolPool now reads specs through to the inner pool."""
+    def __init__(self):
+        self._specs = {}
+
+    def add_spec(self, spec):
+        self._specs[spec.name] = spec
+
+    def remove_spec(self, name):
+        self._specs.pop(name, None)
+
+    def spec(self, name):
+        return self._specs.get(name)
+
+    def names(self):
+        return list(self._specs)
+
+
+class _InnerPool(_SpecBookkeeping):
     async def call_tool(self, worker, tool, arguments):
         # Returns a list payload large enough to exceed a 100-byte inline_budget.
         return _Result(json.dumps([{"hex": "ab" * 2000}]))
 
 
-class _ErrorInnerPool:
+class _ErrorInnerPool(_SpecBookkeeping):
     async def call_tool(self, worker, tool, arguments):
         return _Result("tool execution failed", is_error=True)
 

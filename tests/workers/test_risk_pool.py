@@ -15,6 +15,15 @@ class _InnerPool:
     def __init__(self):
         self.calls = []
         self.raise_on_call = False
+        self._specs = {}
+    def add_spec(self, spec):
+        self._specs[spec.name] = spec
+    def remove_spec(self, name):
+        self._specs.pop(name, None)
+    def spec(self, name):
+        return self._specs.get(name)
+    def names(self):
+        return list(self._specs)
     async def call_tool(self, worker, tool, arguments):
         if self.raise_on_call:
             raise RuntimeError("boom")

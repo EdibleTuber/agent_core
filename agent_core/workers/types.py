@@ -109,6 +109,8 @@ Outcome = Literal[
     "timeout",
     "cancelled",
     "approval_undeliverable",
+    "worker_loaded",
+    "worker_unloaded",
 ]
 
 
@@ -119,7 +121,8 @@ class AuditEntry(BaseModel):
     """The MCP request ID (also propagated to worker logs via _meta for
     cross-stream correlation)."""
     worker: str
-    tool: str
+    tool: str | None = None
+    """None for control-plane rows (worker_loaded / worker_unloaded)."""
     args: dict[str, Any]
     """PARE-controlled redaction is applied before storing here."""
     declared_tier: RiskTier

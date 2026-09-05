@@ -26,6 +26,19 @@ class _FakeInner:
     def __init__(self, tools):
         self._tools = tools
         self.calls = []
+        self._specs = {}
+
+    def add_spec(self, spec):
+        self._specs[spec.name] = spec
+
+    def remove_spec(self, name):
+        self._specs.pop(name, None)
+
+    def spec(self, name):
+        return self._specs.get(name)
+
+    def names(self):
+        return list(self._specs)
 
     async def list_tools(self, worker):
         return _ListResult(self._tools)
