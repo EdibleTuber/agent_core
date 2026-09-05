@@ -1,5 +1,69 @@
 # Changelog
 
+## [1.8.0] - 2026-09-05
+
+### Added
+- `WorkerManager` (`agent_core.workers.manager`) — runtime worker lifecycle: `load`, `unload`, `reload`, `load_autoload`, `status`, `unavailable_reason`. The only component that mutates the registry, connection pool and tool executor together, so boot (`load_autoload`) and an operator's runtime load are literally the same code path.
+- Every `WorkerManager` operation returns a `WorkerOpResult` (`op`, `name`, `ok`, `tool_count`, `tools`, `error`, `error_kind`) rather than raising — a worker that fails to load must not take down the daemon or the caller's turn. `ErrorKind` ∈ `{unknown_worker, spawn_failed, connect_timeout, protocol_mismatch, tool_collision, requires_unmet, list_tools_failed, disconnect_timeout}`. `requires_unmet` gives an unmet `Tool.requires` its own label instead of folding it into `spawn_failed`, so a config/wiring problem sends an operator hunting the right thing instead of a connection issue that isn't there.
+- `Agent.astartup()` / `Agent.ashutdown()` — async lifecycle hooks, both no-op by default. `Daemon.serve()` now binds with `start_serving=False`, awaits `astartup()`, and only then accepts, so the socket exists immediately while no request is dispatched against a half-populated executor.
+- `WorkerSpec.autoload` (default `True`) — declared-but-not-loaded workers.
+- `ToolExecutor.add/add_all/remove/remove_worker/__contains__` — the registry is mutable at runtime. `add()` refuses to shadow an existing name; `add_all()` validates the whole batch before committing any of it.
+- Synthesized worker tools carry a `worker` class attribute, so `remove_worker` keys on provenance rather than the name prefix.
+- `AuditEntry` gains the outcomes `worker_loaded` / `worker_unloaded` and a nullable `tool`, for control-plane rows.
+
+### Changed
+- `MCPClientPool` now owns each connection in a dedicated task. anyio binds a cancel scope to the task that entered it, so a client connected during startup could not be closed from a per-message handler task: `close()` raised `RuntimeError` and the worker subprocess survived until the event loop exited. The single global connect lock is now per-worker.
+- `RiskAwareToolPool` reads specs through to `MCPClientPool` instead of keeping a second dict, and keeps a **session tier high-water mark that lifecycle never evicts**. Escalate-only was monotonic within one resolution but not across time; a reload against a build that stopped advertising would drop a tool to its `risk_default` floor. A re-advertised lower tier now fails closed at the previously observed tier.
+- **The `inner` pool passed to `RiskAwareToolPool` now needs `add_spec(spec)`, `spec(name)` and `names()`, in addition to the `list_tools`/`call_tool`/`close_all` it already needed.** `RiskAwareToolPool` no longer keeps its own `_specs` dict — the two dicts could drift, and the drift direction where the outer pool still held a spec the inner had already lost resolved the tool's tier at the worker's floor and skipped HITL approval entirely. `inner` was always annotated `MCPClientPool`, which satisfies this with no changes required; a consumer with a hand-rolled inner-pool test double will need to add the three methods.
+- Session approvals are keyed by a per-worker generation, so an approval resolving after a reload does not apply to the new process, and a call approved before a reload is refused rather than dispatched against a different binary. `close_all` bumps every generation.
+- `ToolExecutor.schemas()` emits a stable order (non-worker tools in insertion order, then worker tools sorted by `(worker, name)`). It is a prompt-cache prefix, and concurrent autoload makes registration order nondeterministic. `names()` keeps insertion order.
+- `ToolExecutor.build()` now logs a warning on a duplicate tool name instead of silently overwriting. It still overwrites — raising would break a consumer that intentionally shadows a builtin, so that is scheduled for 2.0.0.
+
+### Fixed
+- `RiskAwareToolPool` audits `asyncio.CancelledError` before re-raising. Disconnecting mid-dispatch tears the task down with a `BaseException` that every guard on the audited path missed, so a dispatch could execute leaving no record at all. `Outcome` had a `"cancelled"` value nothing had ever emitted.
+- `discover_and_register` no longer catches `CancelledError`. Absorbing it and continuing the loop inside an already-cancelling task makes every subsequent await re-raise — the best code-supported explanation for the sibling-discovery cascade reported by consumers.
+- A stale comment in `risk_pool.call_tool` claimed a missing wire tier "fails safe to high"; `resolve_declared_tier` uses the worker's floor. The comment is corrected — it was actively misleading.
+
+### Notes
+- `worker_contract_version` stays at `1`. No wire fields change; workers need no edits.
+- Dependencies pinned: `mcp>=1.27.0,<2` (2.0 renamed `streamablehttp_client` to `streamable_http_client`) and `fastmcp>=2.11,<2.12` in the dev extra (2.12+ imports `IdentityAssertionParams`, absent from `mcp` 1.x).
+
+## [1.7.3] - 2026-07-15
+
+### Fixed
+- `RiskAwareToolPool._execute_and_audit` derived the audit outcome solely from the MCP `isError` flag. Internal workers (frida, static, ...) signal failure by returning normally with an in-band envelope (`{"summary", "error": true, "detail"}`) rather than raising, so FastMCP never sets `isError` and every worker-signalled failure was recorded as `outcome="ok"` — a failed `attach` looked identical to a successful one in the audit trail. `_worker_error_message` now inspects the result's text content for a top-level `"error": true` envelope; when present, the call audits as `"error"` and the worker's own message (summary + detail) is carried into `AuditEntry.detail`. The MCP `isError` path is unchanged, and non-JSON / non-envelope content is still treated as success (defensive parse).
+
+## [1.7.2] - 2026-07-14
+
+### Added
+- The builtin `/model` command is now swap-capable: `/model <name>` loads the model on the manager and repoints the session in one step, instead of only setting `inference.default_model` locally and requiring a separate manual `POST /swap` (which could 409). Also adds `/model list`, `/model default`, and `/model --target main|batch`. Plain OpenAI-compatible endpoints (no `/status`) fall back to showing the current pointer. PAL keeps its own override for now.
+
+### Fixed
+- `pyproject.toml`'s `version` field was never bumped when the `v1.7.0`/`v1.7.1` tags were cut, so `pip show agent_core` reported `1.6.2` regardless of which tag was actually installed, causing false "stale install" alarms. Realigned with the current release tag.
+
+## [1.7.1] - 2026-07-04
+
+### Fixed
+- `run_repl` double-printed a reasoning-off, text-only turn: it streams `StreamChunkMessage` tokens live, then a closing `ResponseMessage` carries the same joined text, and both were rendered in full. A per-turn `_TurnPrinter` now tracks what has already been streamed and, when the closing message merely repeats the accumulated stream, emits only the newline that terminates the line; a `ResponseMessage` not preceded by streaming (reasoning on), or whose text diverges from the stream, is still printed in full, so no output is ever lost. Tool turns were unaffected (their final answer already comes from a non-streamed `complete()`). Affects only `run_repl` (PARE) — PAL's own bespoke Rich REPL is untouched.
+
+## [1.7.0] - 2026-07-03
+
+### Added
+- `agent_core.capture.CaptureLayer` — an opt-in, schema-on-read store that substitutes a large tool result with a bounded summary/stub instead of dumping it whole into the prompt, with the original retrievable later. Wired into `RiskAwareToolPool` via an optional `capture_layer` constructor param and a `capture` flag on `call_tool`; when `capture_layer` is `None` (every existing caller), dispatch is byte-for-byte unchanged, and error (`isError`) results are never captured or substituted.
+- Two new opt-in tools, `search_capture` and `read_capture`, exposed once a `CaptureLayer` is wired in. `search_capture` is FTS5-backed (`fts_phrase()` escapes punctuation so a query can't break FTS syntax) with worker/field(+contains) filtering over an allowlisted column set, plus a `recent()` path; a dead or absent `ref` resolves to an explicit sentinel rather than raising.
+- Store internals: write/get with blob spill (blobs directory `chmod`'d `0700`, blob files `0600`) for oversized rows, JSON shape inference with column union and address normalization, and a hard-bounded "shape not content" stub builder so a captured summary never exceeds its byte budget — including for a pathologically long `ref`/worker name.
+- Per-project store resolution: an XDG-state-rooted path keyed by a configurable `project_marker`, capped at a `HOME` ceiling, with store-provider indirection so each project resolves to its own store instead of sharing one, and explicit-`None`-vs-unset handling for the marker.
+- `agent_core.capture`'s public surface (the store, layer, and the two tool classes) is now exported for consumers.
+- `ChatMessage`/`CommandMessage` gained a `cwd` field; the daemon threads it from the wire message into `HandlerContext`, and `run_repl` stamps the caller's working directory on outgoing messages. `context_window_tokens` is now configurable.
+
+### Fixed
+- `infer_rows` only unwrapped a single-key envelope. A worker response pairing a scalar summary with a data list (`{"summary": "2 processes", "processes": [...]}`) has two keys, so it collapsed to one row with the whole list stringified into a single cell — corrupting the stored row count, the model stub, and the `/snapshot` render. The unwrap now generalizes to "exactly one list value plus scalar siblings" (a dict sibling still means a genuine multi-field record, so it still stays one row), and any multi-row result is now treated as substantial so small enumerations are still stored for re-view. Found by the PARE capture-wiring whole-branch review.
+- Delete/purge kept spilled captures searchable: per-row FTS delete now issues the external-content `delete` command with the original indexed values restored from the blob, instead of a rebuild, so large spilled captures remain findable after any delete/purge; `ref` widened from 32-bit to 64-bit to avoid an `IntegrityError` at roughly 65k rows. Size-based purge now skips protected refs instead of bailing out of the whole purge, and delete/purge are blob-aware so the blob store stays consistent with the row store.
+- The stub tier-3 fallback clipped some fields but not `ref`/worker; both are now clipped so the byte bound holds even for a pathologically long `ref` or worker name.
+
+### Notes
+- `worker_contract_version` unaffected — this release does not touch the MCP wire surface.
+
 ## [1.6.2] - 2026-06-19
 
 ### Added
