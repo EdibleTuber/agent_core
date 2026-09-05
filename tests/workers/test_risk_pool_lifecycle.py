@@ -24,6 +24,14 @@ def _pool(tmp_path, spec):
     )
 
 
+def _pool_multi(tmp_path, specs):
+    inner = MCPClientPool(specs)
+    return inner, RiskAwareToolPool(
+        inner=inner, specs={s.name: s for s in specs}, risk_gate=RiskGate(overrides=[]),
+        approval_registry=ToolApprovalRegistry(), audit_log=AuditLog(tmp_path),
+    )
+
+
 def _spec(name="frida", floor="low"):
     return WorkerSpec(name=name, transport="stdio", risk_default=floor,
                       command="/bin/true")
@@ -115,6 +123,37 @@ async def test_close_all_also_clears_approvals(tmp_path):
     assert not pool.is_session_approved("frida", "java_hook")
 
 
+async def test_close_all_clears_approvals_for_a_never_reloaded_worker_too(tmp_path):
+    """Regression: close_all used `list(self._generations) or self._inner.names()`.
+
+    `or` short-circuits rather than unions: as soon as ANY worker has been
+    through add_spec/remove_spec once, `_generations` is non-empty and
+    `_inner.names()` is never consulted, so every worker that was never
+    individually reloaded keeps generation 0 and its session approvals
+    survive a full close_all teardown -- exactly the case the previous test
+    can't see, because it never calls add_spec/remove_spec on anything.
+
+    Here `frida` gets reloaded (bumping `_generations`); `adb` never does.
+    close_all must still evict adb's approval.
+    """
+    frida = _spec("frida")
+    adb = _spec("adb")
+    inner, pool = _pool_multi(tmp_path, [frida, adb])
+
+    pool.record_session_approval("adb", "shell", pool.generation("adb"))
+    assert pool.is_session_approved("adb", "shell")
+
+    # Reload an UNRELATED worker first. This must not make close_all skip adb.
+    pool.remove_spec("frida")
+    pool.add_spec(frida)
+
+    await pool.close_all()
+    assert not pool.is_session_approved("adb", "shell"), (
+        "close_all skipped a never-reloaded worker and laundered its approval "
+        "across a full teardown"
+    )
+
+
 async def test_cancelled_dispatch_is_audited(tmp_path, monkeypatch):
     """Unload mid-dispatch surfaces as CancelledError, a BaseException that every
     guard on this path misses — so the dispatch executed with no audit row."""
@@ -131,6 +170,36 @@ async def test_cancelled_dispatch_is_audited(tmp_path, monkeypatch):
     rows = _audit_rows(tmp_path)
     assert rows, "expected an audit row for the cancelled dispatch"
     assert rows[-1]["outcome"] == "cancelled"
+
+
+async def test_hostile_tier_earlier_in_listing_does_not_abort_discovery(tmp_path, monkeypatch):
+    """A hostile/unhashable advertised tier (risk.py:57-59 documents that the
+    wire tier "may be hostile/arbitrary (dict, list, bool, ...)") for one tool
+    must not raise and abort discovery of tools listed after it -- nor drop
+    them to the floor by leaving them unrecorded.
+
+    Regression for `_max_tier`'s `t in _TIER_ORDER` membership test, which
+    raises TypeError on an unhashable `t` (a dict/list) since `_TIER_ORDER`
+    is a dict; the raise happened inside the list_tools loop, after the
+    hostile tool but before any tool listed after it was processed.
+    """
+    spec = _spec()
+    inner, pool = _pool(tmp_path, spec)
+
+    async def hostile_listing(worker):
+        return _Listing([
+            _Tool("write_memory", "critical"),
+            _Tool("hostile_tool", {"x": 1}),   # unhashable -- must not raise
+            _Tool("read_memory", "high"),      # listed AFTER the hostile entry
+        ])
+    monkeypatch.setattr(inner, "list_tools", hostile_listing)
+
+    await pool.list_tools("frida")   # must not raise
+
+    assert pool.resolve_effective("frida", "read_memory") == "high", (
+        "a hostile entry earlier in the listing aborted discovery, leaving a "
+        "later tool's wire tier unrecorded and its effective tier at the floor"
+    )
 
 
 async def test_specs_are_read_through_not_duplicated(tmp_path):

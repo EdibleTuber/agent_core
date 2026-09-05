@@ -111,6 +111,43 @@ async def test_missing_tier_falls_back_to_floor():
 
 
 @pytest.mark.asyncio
+async def test_malformed_and_absent_advertised_tiers_are_distinguishable():
+    """A malformed advertised tier is a possible tampering/bug signal
+    (risk.py:57-59) and must be flagged tier_source="invalid_advertised",
+    distinct from a genuinely absent tier's "floor" -- both resolve to the
+    same declared_tier (the floor), so only tier_source carries the signal.
+
+    Regression: RiskAwareToolPool.call_tool used to pre-combine the wire tier
+    with the high-water mark via `_max_tier` BEFORE calling
+    resolve_declared_tier. `_max_tier` only ever returns a recognized tier
+    string or None, so a malformed-but-hashable value (a typo'd string, a
+    bare int, ...) silently became None -- indistinguishable from "never
+    advertised" -- and resolve_declared_tier reported "floor" for both.
+    """
+    spec = WorkerSpec(name="frida", transport="stdio", command="x", risk_default="low")
+    inner = _FakeInner([
+        _Tool("untagged", None),   # genuinely absent
+        _Tool("garbled", "ULTRA"),  # malformed: not a valid RiskTier string
+        _Tool("also_garbled", 42),  # malformed: hashable but not a string
+    ])
+    pool = _pool(inner, spec)
+    await pool.list_tools("frida")
+
+    await pool.call_tool("frida", "untagged", {})
+    assert pool._audit.entries[-1].declared_tier == "low"
+    assert pool._audit.entries[-1].tier_source == "floor"
+
+    await pool.call_tool("frida", "garbled", {})
+    assert pool._audit.entries[-1].declared_tier == "low"
+    assert pool._audit.entries[-1].tier_source == "invalid_advertised", (
+        "a malformed wire tier was indistinguishable from an absent one"
+    )
+
+    await pool.call_tool("frida", "also_garbled", {})
+    assert pool._audit.entries[-1].tier_source == "invalid_advertised"
+
+
+@pytest.mark.asyncio
 async def test_call_before_discovery_uses_floor():
     # cache never populated (no list_tools call) -> advertised is None -> floor.
     # In the real flow discovery always precedes dispatch; this just documents
