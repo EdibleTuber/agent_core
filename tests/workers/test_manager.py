@@ -1,5 +1,6 @@
 """WorkerManager lifecycle against a real stdio worker subprocess."""
 import asyncio
+import contextlib
 import json
 
 import pytest
@@ -99,6 +100,48 @@ async def test_unload_removes_only_its_own_tools(tmp_path, stdio_stub_spec):
     assert res.ok and res.tool_count == 2
     assert set(ex.names()) == builtins
     assert not inner.is_connected("stub")
+
+
+async def test_unload_of_a_slow_close_yields_disconnect_timeout(
+        tmp_path, stdio_stub_spec, monkeypatch):
+    """A worker whose close() outlives disconnect_timeout must not wedge
+    unload() forever -- it must report disconnect_timeout within the bound.
+
+    Regression test for the round-2 fix to client_pool.MCPClientPool._reap
+    (asyncio.shield). Without it, the manager's own `wait_for(...,
+    timeout=self._disconnect_timeout)` cancellation reached the owner task
+    itself (through _reap's bare `await task`) rather than stopping at the
+    caller's own frame -- so unload() ended up waiting out however long the
+    (now also cancelled) owner's close() actually took, unbounded, instead
+    of bounding the wait and reporting disconnect_timeout. Notably, close()
+    here does NOT need to ignore cancellation to prove this: with the fix,
+    the owner is never cancelled at all in this path (that's the point --
+    only the caller's own wait unwinds), so a plain slow close() that
+    hasn't returned yet is already sufficient.
+    """
+    from agent_core.workers.client import MCPClient
+
+    async def _slow_close(self):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(MCPClient, "close", _slow_close)
+
+    mgr, pool, ex, inner = _manager(tmp_path, [stdio_stub_spec("stub", "low")])
+    mgr._disconnect_timeout = 0.3
+    assert (await mgr.load("stub")).ok
+    owner = inner._owners["stub"]
+
+    res = await mgr.unload("stub")
+    assert not res.ok
+    assert res.error_kind == "disconnect_timeout"
+    assert not owner.done(), "the owner (and its slow close()) must survive unload()'s timeout"
+
+    # The owner is still parked inside the monkeypatched close(), never
+    # cancelled -- clean it up directly rather than leave it running for the
+    # rest of the session.
+    owner.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await owner
 
 
 async def test_unload_from_a_different_task(tmp_path, stdio_stub_spec):

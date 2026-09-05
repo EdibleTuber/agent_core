@@ -189,36 +189,63 @@ class MCPClientPool:
         defeat this exact check.
         """
         task = self._owners.pop(worker, None)
-        if task is not None:
-            task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=DEFAULT_OWNER_JOIN_TIMEOUT)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "owner task for worker %r did not unwind within %ss after "
-                    "cancel(); abandoning it (best-effort)",
-                    worker, DEFAULT_OWNER_JOIN_TIMEOUT)
-            except asyncio.CancelledError:
-                if not task.cancelled():
-                    raise
-            except Exception:
-                pass  # the owner task's own connect/initialize failure
-        self._cleanup(worker)
+        try:
+            if task is not None:
+                task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=DEFAULT_OWNER_JOIN_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "owner task for worker %r did not unwind within %ss after "
+                        "cancel(); abandoning it (best-effort)",
+                        worker, DEFAULT_OWNER_JOIN_TIMEOUT)
+                except asyncio.CancelledError:
+                    if not task.cancelled():
+                        raise
+                except Exception:
+                    pass  # the owner task's own connect/initialize failure
+        finally:
+            # MUST run even on the re-raise above: the pre-fix `suppress
+            # (BaseException)` always reached this; a bare `raise` inside the
+            # try does not, and would otherwise leave _ready/_stop (and
+            # _clients, if the owner published between the timeout and the
+            # cancel) keyed by `worker` with no owner task behind them.
+            self._cleanup(worker)
 
     async def _reap(self, worker: str) -> None:
-        """Wait for the owner task to finish. See _cancel_owner's docstring
-        for why a plain `except CancelledError: if not task.cancelled(): raise`
-        is required instead of `suppress(BaseException)`."""
+        """Wait for the owner task to finish.
+
+        `asyncio.shield(task)` is not optional here, and a bare `await task`
+        is not equivalent to `_cancel_owner`'s bare-`await`-free-of-shield
+        predecessor being "good enough" -- it is the SAME bug. `Task.cancel()`
+        cancels whatever future is currently in that task's `_fut_waiter`;
+        when the caller is blocked in a bare `await task`, `task` itself IS
+        that future, so cancelling the caller (e.g. daemon shutdown cancelling
+        whichever task is running WorkerManager.unload) cancels the owner task
+        too, as a direct side effect -- not merely raises CancelledError past
+        it. That makes `task.cancelled()` become True as a result of the
+        caller's OWN cancellation, not just the owner's, defeating the
+        disambiguation below and silently absorbing the caller's cancellation
+        (the same failure mode as the original `suppress(BaseException)`, and
+        the reason a wedged worker's `disconnect_timeout` could fail to fire
+        at all -- the manager's own `wait_for` timeout cancels this task,
+        which without the shield would cancel the owner instead of raising
+        here). `asyncio.shield` makes the caller await a separate wrapper
+        future instead, so cancelling the caller cannot reach `task` and
+        `task.cancelled()` still means what it says.
+        """
         task = self._owners.pop(worker, None)
-        if task is not None:
-            try:
-                await task
-            except asyncio.CancelledError:
-                if not task.cancelled():
-                    raise
-            except Exception:
-                pass
-        self._cleanup(worker)
+        try:
+            if task is not None:
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if not task.cancelled():
+                        raise
+                except Exception:
+                    pass
+        finally:
+            self._cleanup(worker)
 
     def _cleanup(self, worker: str) -> None:
         self._clients.pop(worker, None)

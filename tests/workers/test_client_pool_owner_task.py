@@ -22,6 +22,66 @@ def _alive(pid: int) -> bool:
         return False
 
 
+async def test_reap_propagates_caller_cancellation_without_cancelling_the_owner(
+        stdio_stub_spec):
+    """Mirrors the reviewer's probe for the round-2 finding: cancelling
+    whoever calls `_reap` (e.g. the daemon shutting down mid-`unload()`, or
+    `MCPClientPool.disconnect` being cancelled by `WorkerManager`'s own
+    `wait_for(disconnect_timeout)`) must propagate as CancelledError to that
+    caller, not be silently absorbed as though it were the owner task's own
+    outcome.
+
+    Without `asyncio.shield`, `Task.cancel()` cancels whatever future is
+    currently the caller's `_fut_waiter`; when the caller is blocked in a
+    bare `await task`, `task` IS that future, so cancelling the caller
+    cancels the owner task too, as a direct side effect -- not merely raises
+    CancelledError past it. That makes `task.cancelled()` become True as a
+    result of the CALLER's own cancellation, defeating the disambiguation
+    `_reap` relies on and silently eating the cancellation.
+    """
+    from agent_core.workers.client_pool import MCPClientPool
+
+    pool = MCPClientPool([stdio_stub_spec("stub", "low")])
+    await pool.list_tools("stub")             # connects; owner now parked
+    owner = pool._owners["stub"]
+    # Captured BEFORE calling _reap: _reap's `finally` unconditionally pops
+    # this worker's entry out of self._stop (via _cleanup), including on the
+    # re-raise path below, so looking it up afterwards would find nothing to
+    # set and leave the still-parked owner waiting forever.
+    stop_event = pool._stop["stub"]
+
+    ran_after = []
+
+    async def caller():
+        await pool._reap("stub")
+        ran_after.append("after")
+
+    task = asyncio.create_task(caller())
+    await asyncio.sleep(0)                     # let it enter _reap's await
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert ran_after == [], "the caller's cancellation must propagate, not be absorbed"
+    assert not owner.done(), "the owner task must survive the caller's own cancellation"
+
+    # Clean up the still-parked owner directly -- this test bypassed
+    # disconnect() to isolate _reap on the caller-cancelled path.
+    stop_event.set()
+    await owner
+
+
+async def test_reap_returns_cleanly_when_the_owner_finishes_normally(stdio_stub_spec):
+    """Control case for the test above: an uncancelled `_reap` must still
+    return once the owner task finishes on its own, not hang or raise."""
+    from agent_core.workers.client_pool import MCPClientPool
+
+    pool = MCPClientPool([stdio_stub_spec("stub", "low")])
+    await pool.list_tools("stub")
+    pool._stop["stub"].set()                   # let the owner finish on its own
+    await pool._reap("stub")                    # must return, not raise/hang
+    assert pool._owners.get("stub") is None
+
+
 async def test_disconnect_from_a_different_task(stdio_stub_spec):
     from agent_core.workers.client_pool import MCPClientPool
 
