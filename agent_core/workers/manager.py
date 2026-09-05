@@ -28,7 +28,7 @@ DEFAULT_DISCONNECT_TIMEOUT = 5.0
 
 ErrorKind = Literal[
     "unknown_worker", "spawn_failed", "connect_timeout", "protocol_mismatch",
-    "tool_collision", "list_tools_failed", "disconnect_timeout",
+    "tool_collision", "requires_unmet", "list_tools_failed", "disconnect_timeout",
 ]
 
 
@@ -143,8 +143,25 @@ class WorkerManager:
             return await self._load_locked(spec)
 
     async def _load_locked(self, spec) -> WorkerOpResult:
+        """Body of a load, assuming self._locks[spec.name] is already held
+        and the worker is not currently loaded. Shared by load() and
+        reload() so reload never has to release and re-acquire the lock
+        between its unload half and its load half (see reload())."""
         name = spec.name
-        self._pool.add_spec(spec)
+        try:
+            self._pool.add_spec(spec)
+        except Exception as exc:
+            # Must never raise (class docstring): add_spec is sync dict/set
+            # bookkeeping and shouldn't fail, but nothing upstream has been
+            # touched yet if it does, so there is nothing to roll back beyond
+            # a defensive remove_spec.
+            message = f"{type(exc).__name__}: {exc}"
+            with contextlib.suppress(Exception):
+                self._pool.remove_spec(name)
+            self._errors[name] = message
+            logger.warning("worker %s: add_spec failed: %s", name, message)
+            return WorkerOpResult("load", name, False, error=message, error_kind="spawn_failed")
+
         try:
             await self._pool.connect(name, timeout=self._connect_timeout)
         except asyncio.TimeoutError:
@@ -179,70 +196,147 @@ class WorkerManager:
         except ValueError as exc:
             return await self._fail(name, "tool_collision", str(exc))
         except RuntimeError as exc:
-            return await self._fail(name, "spawn_failed", str(exc))
+            # Unmet `requires` — a config/wiring problem, not a connect
+            # failure. Labeling it "spawn_failed" sent operators hunting the
+            # wrong thing; it gets its own ErrorKind instead.
+            return await self._fail(name, "requires_unmet", str(exc))
 
         names = [c.name for c in classes]
         self._loaded[name] = names
         self._errors.pop(name, None)
-        self._pool.emit_lifecycle(name, "worker_loaded",
-                                  args={"transport": spec.transport,
-                                        "command": spec.command or spec.endpoint,
-                                        "tool_count": len(names)})
+        try:
+            self._pool.emit_lifecycle(name, "worker_loaded",
+                                      args={"transport": spec.transport,
+                                            "command": spec.command or spec.endpoint,
+                                            "tool_count": len(names)})
+        except Exception:
+            # A lifecycle audit row is not worth failing an otherwise-good
+            # load over (real disk I/O — AuditLog.append can raise OSError).
+            logger.warning("worker %s: failed to record worker_loaded audit row",
+                           name, exc_info=True)
         logger.info("loaded worker %s (%d tools)", name, len(names))
         return WorkerOpResult("load", name, True, tool_count=len(names), tools=names)
 
     async def _fail(self, name: str, kind: ErrorKind, message: str) -> WorkerOpResult:
-        """Roll a partial load back to the unloaded state."""
-        with contextlib.suppress(Exception):
-            await self._pool.disconnect(name)
+        """Roll a partial load back to the unloaded state.
+
+        Ordering mirrors unload(): every step that cannot hang -- tool
+        removal, spec removal (bumps generation, evicts approvals) -- runs
+        BEFORE the disconnect, which is bounded by a timeout. A load can fail
+        with the subprocess already spawned and the owner task parked (e.g. a
+        tool-name collision, discovered only after connect()+list_tools()
+        succeed) -- an unbounded disconnect-first here would let a wedged
+        subprocess hang this call forever while still holding
+        self._locks[name], and would leave the spec registered (exactly the
+        residue test_dispatch_after_unload_does_not_resurrect_the_worker
+        exists to catch) for as long as that hang lasts.
+        """
         self._executor.remove_worker(name)
         self._pool.remove_spec(name)
         self._loaded.pop(name, None)
+        try:
+            await asyncio.wait_for(self._pool.disconnect(name),
+                                   timeout=self._disconnect_timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "worker %s: disconnect during load rollback did not finish "
+                "within %ss; its process may still be running",
+                name, self._disconnect_timeout)
+        except Exception:
+            logger.warning("worker %s: disconnect during load rollback failed",
+                           name, exc_info=True)
         self._errors[name] = message
         logger.warning("worker %s load failed (%s): %s", name, kind, message)
         return WorkerOpResult("load", name, False, error=message, error_kind=kind)
 
     async def unload(self, name: str) -> WorkerOpResult:
         async with self._locks[name]:
-            if not self.is_loaded(name):
-                return WorkerOpResult("unload", name, True)
-            # Order matters: everything before the disconnect is unconditional
-            # and cannot hang, so a wedged teardown can never leave a worker
-            # whose tools are gone but whose spec and approvals remain.
-            removed = self._executor.remove_worker(name)
-            self._pool.remove_spec(name)          # bumps generation, evicts approvals
-            self._loaded.pop(name, None)
-            err = kind = None
-            try:
-                await asyncio.wait_for(self._pool.disconnect(name),
-                                       timeout=self._disconnect_timeout)
-            except asyncio.TimeoutError:
-                kind, err = "disconnect_timeout", (
-                    f"worker {name!r} did not shut down within "
-                    f"{self._disconnect_timeout}s; its process may still be running")
-                self._errors[name] = err
-                logger.warning(err)
+            return await self._unload_locked(name)
+
+    async def _unload_locked(self, name: str) -> WorkerOpResult:
+        """Body of an unload, assuming self._locks[name] is already held."""
+        if not self.is_loaded(name):
+            return WorkerOpResult("unload", name, True)
+        # Order matters: everything before the disconnect is unconditional
+        # and cannot hang, so a wedged teardown can never leave a worker
+        # whose tools are gone but whose spec and approvals remain.
+        removed = self._executor.remove_worker(name)
+        self._pool.remove_spec(name)          # bumps generation, evicts approvals
+        self._loaded.pop(name, None)
+        err = kind = None
+        try:
+            await asyncio.wait_for(self._pool.disconnect(name),
+                                   timeout=self._disconnect_timeout)
+        except asyncio.TimeoutError:
+            kind, err = "disconnect_timeout", (
+                f"worker {name!r} did not shut down within "
+                f"{self._disconnect_timeout}s; its process may still be running")
+            self._errors[name] = err
+            logger.warning(err)
+        try:
             self._pool.emit_lifecycle(name, "worker_unloaded",
                                       detail=err, args={"tools_removed": removed})
-            return WorkerOpResult("unload", name, err is None,
-                                  tool_count=removed, error=err, error_kind=kind)
+        except Exception:
+            logger.warning("worker %s: failed to record worker_unloaded audit row",
+                           name, exc_info=True)
+        return WorkerOpResult("unload", name, err is None,
+                              tool_count=removed, error=err, error_kind=kind)
 
     async def reload(self, name: str) -> WorkerOpResult:
-        un = await self.unload(name)
-        if not un.ok:
-            return WorkerOpResult("reload", name, False,
-                                  error=f"unload half failed: {un.error}",
-                                  error_kind=un.error_kind)
-        res = await self.load(name)
-        return WorkerOpResult("reload", name, res.ok, res.tool_count, res.tools,
-                              res.error, res.error_kind)
+        """Unload then load, as ONE transaction under ONE lock acquisition.
+
+        load() and unload() each take self._locks[name] independently; if
+        reload() simply called `await self.unload(name)` followed by
+        `await self.load(name)`, the lock would be released between the two
+        and a concurrent load()/unload() could land in that window. reload()
+        is the primary worker-development loop, so it's the operation most
+        likely to be driven concurrently with something else -- hence one
+        `async with` spanning both halves, calling the *_locked helpers
+        directly rather than the public, separately-locking methods.
+        """
+        async with self._locks[name]:
+            un = await self._unload_locked(name)
+            if not un.ok:
+                return WorkerOpResult("reload", name, False,
+                                      error=f"unload half failed: {un.error}",
+                                      error_kind=un.error_kind)
+            try:
+                spec = self._registry.get(name)
+            except WorkerNotFoundError:
+                return WorkerOpResult(
+                    "reload", name, False, error_kind="unknown_worker",
+                    error=(f"no worker named {name!r}; declared: "
+                           f"{sorted(s.name for s in self._registry.all())}"))
+            res = await self._load_locked(spec)
+            return WorkerOpResult("reload", name, res.ok, res.tool_count, res.tools,
+                                  res.error, res.error_kind)
 
     async def load_autoload(self) -> list[WorkerOpResult]:
-        """Boot path. Gathers so boot costs max(), not sum()."""
+        """Boot path. Gathers so boot costs max(), not sum().
+
+        `return_exceptions=True`: a bare `gather()` aborts every in-flight
+        load the instant ANY one of them raises, taking the whole boot down
+        with it -- the opposite of the resilience this design exists for. A
+        genuine cancellation of the caller's own task is unaffected: that
+        cancels the gather() call itself (and everything under it) rather
+        than showing up in `results`, so it still propagates.
+        """
         targets = [s.name for s in self._registry.all() if s.autoload]
         if not targets:
             return []
-        return list(await asyncio.gather(*(self.load(n) for n in targets)))
+        results = await asyncio.gather(
+            *(self.load(n) for n in targets), return_exceptions=True)
+        out: list[WorkerOpResult] = []
+        for name, res in zip(targets, results):
+            if isinstance(res, BaseException):
+                logger.warning("worker %s: load_autoload crashed unexpectedly: %s",
+                               name, res, exc_info=res)
+                out.append(WorkerOpResult(
+                    "load", name, False,
+                    error=f"{type(res).__name__}: {res}", error_kind="spawn_failed"))
+            else:
+                out.append(res)
+        return out
 
     async def close_all(self) -> None:
         for name in list(self._loaded):
