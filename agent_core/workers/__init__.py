@@ -10,11 +10,21 @@ suite their workers must pass.
 from agent_core.workers.client import MCPClient
 from agent_core.workers.client_pool import MCPClientPool
 from agent_core.workers.discovery import discover_and_register
+from agent_core.workers.manager import (
+    WorkerManager, WorkerOpResult, WorkerStatus,
+)
+from agent_core.workers.registry import WorkerRegistry
+from agent_core.workers.risk_pool import RiskAwareToolPool
 from agent_core.workers.tool_factory import make_tool_class
 
 __all__ = [
     "MCPClient",
     "MCPClientPool",
+    "RiskAwareToolPool",
+    "WorkerManager",
+    "WorkerOpResult",
+    "WorkerRegistry",
+    "WorkerStatus",
     "discover_and_register",
     "make_tool_class",
 ]
