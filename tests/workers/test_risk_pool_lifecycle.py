@@ -173,7 +173,7 @@ async def test_cancelled_dispatch_is_audited(tmp_path, monkeypatch):
 
 
 async def test_hostile_tier_earlier_in_listing_does_not_abort_discovery(tmp_path, monkeypatch):
-    """A hostile/unhashable advertised tier (risk.py:57-59 documents that the
+    """A hostile/unhashable advertised tier (risk.py:59-61 documents that the
     wire tier "may be hostile/arbitrary (dict, list, bool, ...)") for one tool
     must not raise and abort discovery of tools listed after it -- nor drop
     them to the floor by leaving them unrecorded.
@@ -212,3 +212,104 @@ async def test_specs_are_read_through_not_duplicated(tmp_path):
     inner, pool = _pool(tmp_path, spec)
     inner.remove_spec("frida")
     assert pool.spec_for("frida") is None
+
+
+def _external_mcp_spec(name="ghidra", floor="low"):
+    return WorkerSpec(name=name, transport="stdio", risk_default=floor,
+                      command="/bin/true", kind="external_mcp")
+
+
+async def _stub_call_tool(worker, tool, arguments):
+    """A trivial successful CallToolResult-shaped stand-in, so a test that
+    lets a low/auto-executed dispatch through doesn't try to actually spawn
+    `/bin/true` as an MCP stdio server."""
+    class _R:
+        isError = False
+        content = []
+    return _R()
+
+
+async def test_external_mcp_worker_ignores_highwater_escalation(tmp_path, monkeypatch):
+    """external_mcp is floor-only (risk.py:46, risk.py:53, risk.py:67-68):
+    per-tool wire tiers are not honored, and neither is the high-water mark
+    derived from them -- or the floor-only contract leaks back in through
+    the escalation `list_tools` feeds regardless of `spec.kind`.
+
+    Regression: the round-1 fix's high-water escalation in call_tool only
+    guarded against `tier_source == "unknown_worker"`, not `external_mcp`.
+    An external_mcp worker advertising "critical" got escalated straight
+    past its floor and blocked pending HITL -- a working deployment that
+    auto-executed at "low" stopped working. Dispatches via call_tool (not
+    just resolve_effective) because resolve_declared_tier's early
+    external_mcp return already made resolve_effective incidentally safe
+    even under the buggy code; call_tool's own escalation was the one that
+    bypassed it, and only exercising the real dispatch path catches that.
+    """
+    spec = _external_mcp_spec()
+    inner, pool = _pool(tmp_path, spec)
+    monkeypatch.setattr(inner, "call_tool", _stub_call_tool)
+
+    async def listing_critical(worker):
+        return _Listing([_Tool("decompile", "critical")])
+    monkeypatch.setattr(inner, "list_tools", listing_critical)
+    await pool.list_tools("ghidra")   # records _tier_highwater regardless of kind
+
+    result = await pool.call_tool("ghidra", "decompile", {})
+    assert not getattr(result, "isError", False), (
+        "external_mcp's floor-only contract was bypassed by the high-water "
+        "mark: the call was blocked pending HITL instead of auto-executing "
+        "at the floor"
+    )
+    assert _audit_rows(tmp_path)[-1]["effective_tier"] == "low"
+    assert pool.resolve_effective("ghidra", "decompile") == "low"
+
+
+async def test_resolve_effective_agrees_with_call_tool_internal_highwater(tmp_path, monkeypatch):
+    """resolve_effective and call_tool must never disagree -- they are two
+    call sites for one rule (_resolve_declared). Internal worker case: a
+    tool with no CURRENT wire tier but a high-water mark from an earlier
+    listing."""
+    spec = _spec()   # frida, low floor, internal
+    inner, pool = _pool(tmp_path, spec)
+    monkeypatch.setattr(inner, "call_tool", _stub_call_tool)
+
+    async def listing_high(worker):
+        return _Listing([_Tool("read_memory", "high")])
+    monkeypatch.setattr(inner, "list_tools", listing_high)
+    await pool.list_tools("frida")
+
+    predicted = pool.resolve_effective("frida", "read_memory")
+    await pool.call_tool("frida", "read_memory", {})
+    actual = _audit_rows(tmp_path)[-1]["effective_tier"]
+    assert predicted == actual == "high"
+
+
+async def test_resolve_effective_agrees_with_call_tool_external_mcp(tmp_path, monkeypatch):
+    """resolve_effective and call_tool must never disagree -- external_mcp
+    worker case: a wire tier is advertised, but the floor-only contract
+    means both paths must land on the floor, not the wire tier."""
+    spec = _external_mcp_spec()
+    inner, pool = _pool(tmp_path, spec)
+    monkeypatch.setattr(inner, "call_tool", _stub_call_tool)
+
+    async def listing_critical(worker):
+        return _Listing([_Tool("decompile", "critical")])
+    monkeypatch.setattr(inner, "list_tools", listing_critical)
+    await pool.list_tools("ghidra")
+
+    predicted = pool.resolve_effective("ghidra", "decompile")
+    await pool.call_tool("ghidra", "decompile", {})
+    actual = _audit_rows(tmp_path)[-1]["effective_tier"]
+    assert predicted == actual == "low"
+
+
+async def test_resolve_effective_agrees_with_call_tool_unknown_worker(tmp_path):
+    """resolve_effective and call_tool must never disagree -- unknown worker
+    case (dispatch to a worker with no registered spec)."""
+    spec = _spec()   # registers "frida"; "ghost" is deliberately not registered
+    inner, pool = _pool(tmp_path, spec)
+
+    predicted = pool.resolve_effective("ghost", "anything")
+    await pool.call_tool("ghost", "anything", {})   # blocked: no approval channel
+    actual = _audit_rows(tmp_path)[-1]["effective_tier"]
+    assert predicted == actual == "high"
