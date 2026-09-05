@@ -16,12 +16,19 @@ same task throughout.
 
 Dispatch is unaffected: calling a client from a foreign task is safe, and only
 teardown carries the affinity requirement.
+
+Every join on an owner task is bounded, and an owner we stop waiting for is
+handed to `_abandon()`: its recorded child pid is SIGKILLed and the task is
+kept in `_orphans` so `close_all()` can still reach it. Abandoning an owner
+without those two steps leaves a worker subprocess alive and unreachable.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import os
+import signal
 from collections import defaultdict
 from typing import Any
 
@@ -50,6 +57,16 @@ class MCPClientPool:
         self._ready: dict[str, asyncio.Event] = {}
         self._stop: dict[str, asyncio.Event] = {}
         self._errors: dict[str, BaseException] = {}
+        # The stdio child's pid, captured the moment the client is usable.
+        # _own() pops self._clients BEFORE awaiting close(), so a worker wedged
+        # in close() has no client to read a pid off any more -- and that is
+        # exactly the case the hard-kill exists for.
+        self._pids: dict[str, int] = {}
+        # Owner tasks we gave up waiting for. Kept REACHABLE (the pre-fix _reap
+        # popped _owners before awaiting, so a caller-cancelled reap dropped the
+        # last reference to a still-running owner and no API could reach it
+        # again) so close_all() can make a final pass at them.
+        self._orphans: dict[asyncio.Task, tuple[str, int | None]] = {}
         # Per-worker, not global: one worker hanging in connect() must not block
         # every other worker's first use.
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -76,15 +93,67 @@ class MCPClientPool:
     def is_connected(self, worker: str) -> bool:
         return worker in self._clients
 
-    def _owner_pid(self, worker: str) -> int | None:
-        """The stdio child's pid, for tests and for hard-kill on a wedged close.
-        None for non-stdio transports or before connect completes."""
-        client = self._clients.get(worker)
+    @staticmethod
+    def _pid_of(client) -> int | None:
+        """Dig the stdio child's pid out of the live transport context."""
         ctx = getattr(client, "_transport_ctx", None)
         gen = getattr(ctx, "gen", None)
         frame = getattr(gen, "ag_frame", None)
         proc = frame.f_locals.get("process") if frame is not None else None
         return getattr(proc, "pid", None)
+
+    def _owner_pid(self, worker: str) -> int | None:
+        """The stdio child's pid, for tests and for hard-kill on a wedged close.
+        None for non-stdio transports or before connect completes.
+
+        Falls back to the pid recorded at connect time: _own() drops the client
+        from self._clients before it awaits close(), so during a wedged close --
+        the one moment the hard-kill needs a pid -- the live lookup returns None.
+        """
+        client = self._clients.get(worker)
+        if client is not None:
+            pid = self._pid_of(client)
+            if pid is not None:
+                return pid
+        return self._pids.get(worker)
+
+    def _kill_pid(self, worker: str, pid: int | None) -> bool:
+        """SIGKILL a worker child we have stopped waiting for.
+
+        Spec section 7: "on timeout, HARD-KILL the recorded child pid". An
+        owner task wedged in close() keeps its subprocess alive for the life of
+        the daemon and beyond -- for a process-attaching worker that is a live
+        attachment outliving the process that made it. SIGKILL rather than
+        SIGTERM: we are here precisely because the graceful path already
+        outlived its bound.
+        """
+        if pid is None:
+            return False
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return False        # already gone; nothing to report
+        except OSError:
+            logger.warning("worker %r: could not hard-kill pid %s", worker, pid,
+                           exc_info=True)
+            return False
+        logger.warning("worker %r: hard-killed child pid %s after its close() "
+                       "outlived the bound", worker, pid)
+        return True
+
+    def _abandon(self, worker: str, task: asyncio.Task) -> None:
+        """Stop waiting for an owner task: hard-kill its child, cancel it, and
+        keep it reachable.
+
+        Cancelling the owner from outside is the sanctioned way to abort a
+        partially-entered anyio scope (see the module docstring); the kill goes
+        first so a close() blocked on a dead child can actually unwind.
+        """
+        pid = self._pids.get(worker)
+        self._orphans[task] = (worker, pid)
+        task.add_done_callback(lambda t: self._orphans.pop(t, None))
+        self._kill_pid(worker, pid)
+        task.cancel()
 
     # --- connection lifecycle --------------------------------------------
     async def _own(self, worker: str) -> None:
@@ -93,8 +162,13 @@ class MCPClientPool:
         Connect, publish, park, close — all in this one task, which is what
         makes teardown legal.
         """
-        client = MCPClient.from_spec(self._specs[worker])
+        client = None
         try:
+            # INSIDE the try: a KeyError from a racing remove_spec used to
+            # escape without ever setting _errors/_ready, so connect() sat out
+            # its full timeout instead of failing fast and asyncio logged an
+            # "exception was never retrieved" warning.
+            client = MCPClient.from_spec(self._specs[worker])
             await client.connect()
             await client.initialize()
         except BaseException as exc:      # includes CancelledError on timeout
@@ -107,10 +181,14 @@ class MCPClientPool:
             # completely failed connect — and it MUST be called here, in this
             # same task, or a cancelled/failed connect leaks the subprocess
             # exactly like the bug this pool exists to fix.
-            with contextlib.suppress(BaseException):
-                await client.close()
+            if client is not None:
+                with contextlib.suppress(BaseException):
+                    await client.close()
             raise
         self._clients[worker] = client
+        pid = self._pid_of(client)
+        if pid is not None:
+            self._pids[worker] = pid
         self._ready[worker].set()
         try:
             await self._stop[worker].wait()
@@ -146,6 +224,20 @@ class MCPClientPool:
                 # Cancel INSIDE the owner task — the only safe way to abort a
                 # partially-entered anyio scope.
                 await self._cancel_owner(worker)
+                raise
+            except BaseException:
+                # A cancellation delivered to the CALLER of connect() -- the
+                # daemon cancels every owned handler task the instant its
+                # client disconnects, so a Ctrl-C'd `/worker load` lands here
+                # -- left the owner task running, the subprocess spawned and
+                # _ready/_stop/_owners still keyed, in flat contradiction of
+                # this method's "Leaves no residue on failure". Worse, the
+                # owner then went on to publish self._clients[worker] and park
+                # forever: a live, reachable worker behind a load that never
+                # completed. Same cleanup as the timeout path, then re-raise so
+                # the cancellation still propagates to the caller's task.
+                with contextlib.suppress(Exception):
+                    await self._cancel_owner(worker)
                 raise
             exc = self._errors.get(worker)
             if exc is not None:
@@ -188,7 +280,7 @@ class MCPClientPool:
         path, which would otherwise flip `task.cancelled()` to True and
         defeat this exact check.
         """
-        task = self._owners.pop(worker, None)
+        task = self._owners.get(worker)
         try:
             if task is not None:
                 task.cancel()
@@ -197,14 +289,19 @@ class MCPClientPool:
                 except asyncio.TimeoutError:
                     logger.warning(
                         "owner task for worker %r did not unwind within %ss after "
-                        "cancel(); abandoning it (best-effort)",
+                        "cancel(); hard-killing its child and abandoning it",
                         worker, DEFAULT_OWNER_JOIN_TIMEOUT)
+                    self._abandon(worker, task)
                 except asyncio.CancelledError:
                     if not task.cancelled():
+                        self._abandon(worker, task)
                         raise
                 except Exception:
                     pass  # the owner task's own connect/initialize failure
         finally:
+            # Popped only here, once the join has either completed or handed
+            # the task to _abandon() -- never before the await (see _reap).
+            self._owners.pop(worker, None)
             # MUST run even on the re-raise above: the pre-fix `suppress
             # (BaseException)` always reached this; a bare `raise` inside the
             # try does not, and would otherwise leave _ready/_stop (and
@@ -212,8 +309,15 @@ class MCPClientPool:
             # cancel) keyed by `worker` with no owner task behind them.
             self._cleanup(worker)
 
-    async def _reap(self, worker: str) -> None:
+    async def _reap(self, worker: str, timeout: float | None = None) -> None:
         """Wait for the owner task to finish.
+
+        `timeout` bounds the join; None means "wait as long as it takes"
+        because the caller (WorkerManager) supplies its own bound. close_all()
+        has no such caller and passes DEFAULT_OWNER_JOIN_TIMEOUT. On expiry --
+        or on a cancellation of the caller, which is how a manager-level
+        disconnect_timeout arrives -- the owner is handed to _abandon(), which
+        hard-kills its child and keeps the task reachable.
 
         `asyncio.shield(task)` is not optional here, and a bare `await task`
         is not equivalent to `_cancel_owner`'s bare-`await`-free-of-shield
@@ -234,26 +338,50 @@ class MCPClientPool:
         future instead, so cancelling the caller cannot reach `task` and
         `task.cancelled()` still means what it says.
         """
-        task = self._owners.pop(worker, None)
+        task = self._owners.get(worker)
         try:
             if task is not None:
                 try:
-                    await asyncio.shield(task)
+                    if timeout is None:
+                        await asyncio.shield(task)
+                    else:
+                        await asyncio.wait_for(asyncio.shield(task), timeout)
+                except asyncio.TimeoutError:
+                    self._abandon(worker, task)
                 except asyncio.CancelledError:
                     if not task.cancelled():
+                        # The caller gave up on us. WorkerManager's own
+                        # `wait_for(disconnect, disconnect_timeout)` arrives
+                        # exactly here, and this IS the mandated
+                        # disconnect_timeout hard-kill path.
+                        self._abandon(worker, task)
                         raise
                 except Exception:
                     pass
         finally:
+            # Popped only AFTER the join has completed or the task has been
+            # handed to _abandon(). The pre-fix pop happened before the await,
+            # so a caller-cancelled reap re-raised past it with the owner task
+            # still running and no longer in _owners -- close_all() iterates
+            # _owners, so the orphan (and its subprocess) became unreachable
+            # for the life of the daemon.
+            self._owners.pop(worker, None)
             self._cleanup(worker)
 
     def _cleanup(self, worker: str) -> None:
         self._clients.pop(worker, None)
         self._ready.pop(worker, None)
         self._stop.pop(worker, None)
+        # Only after _abandon() has had its chance to read it: an abandoned
+        # owner carries its pid forward in self._orphans.
+        self._pids.pop(worker, None)
 
-    async def disconnect(self, worker: str) -> None:
+    async def disconnect(self, worker: str, timeout: float | None = None) -> None:
         """Stop the worker's owner task and wait for its close to finish.
+
+        `timeout` bounds that wait (and hard-kills the child on expiry); None
+        leaves it to the caller's own bound -- WorkerManager wraps this in a
+        `wait_for(..., disconnect_timeout)` so it can report disconnect_timeout.
 
         Takes the same per-worker lock as connect() so the two are mutually
         exclusive: without it, a disconnect() could set the stop event out
@@ -269,7 +397,7 @@ class MCPClientPool:
             stop = self._stop.get(worker)
             if stop is not None:
                 stop.set()
-            await self._reap(worker)
+            await self._reap(worker, timeout=timeout)
             self._errors.pop(worker, None)
 
     async def _ensure_connected(self, worker: str) -> MCPClient:
@@ -290,7 +418,27 @@ class MCPClientPool:
         return await client.call_tool(tool, arguments)
 
     async def close_all(self) -> None:
+        """Shutdown reaper. EVERY wait here is bounded.
+
+        This is the only reaper for a worker the manager never recorded as
+        loaded (a load that failed or was cancelled after connect), so an
+        unbounded join here meant `ashutdown` could hang forever against a
+        worker wedged in close -- and under systemd the daemon then gets
+        SIGKILLed with its worker subprocesses still up, which is the exact
+        outcome the owner-task design exists to prevent.
+        """
         for worker in list(self._owners):
-            with contextlib.suppress(Exception):
-                await self.disconnect(worker)
+            try:
+                await self.disconnect(worker, timeout=DEFAULT_OWNER_JOIN_TIMEOUT)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("worker %r: close_all disconnect failed", worker,
+                               exc_info=True)
+        # Final pass at anything abandoned earlier (here or by a manager-level
+        # disconnect_timeout). Re-killing an already-dead pid is a no-op.
+        for task, (worker, pid) in list(self._orphans.items()):
+            self._kill_pid(worker, pid)
+            if not task.done():
+                task.cancel()
         self._clients.clear()

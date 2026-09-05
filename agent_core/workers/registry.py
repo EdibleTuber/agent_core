@@ -1,8 +1,12 @@
 """WorkerRegistry — loads workers.yaml and exposes workers by name.
 
-Phase 0 ships only the data layer: parsing, validation, lookup. A live
-MCP client (initialize → list_tools → register_tools()) will land in a
-later phase when an actual worker connects.
+The data layer only: parsing, validation, lookup. Connecting to a worker and
+registering its tools belongs to MCPClientPool and WorkerManager.
+
+`add()` mutates the catalog at runtime, and `WorkerManager.reload()` re-reads
+this registry on every reload — so a spec swapped in here takes effect on the
+next reload. Lowering a worker's `risk_default` that way cannot downgrade it:
+RiskAwareToolPool ratchets the floor per session.
 """
 from __future__ import annotations
 

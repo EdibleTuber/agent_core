@@ -139,9 +139,22 @@ class AuditEntry(BaseModel):
     override_reason: str | None = None
     detail: str | None = None
     tier_source: str | None = None
-    """Provenance of declared_tier: "wire" | "floor" | "fallback_safe" |
-    "unknown_worker" | None (pre-v1.6 entries). Forensic honesty: lets an
-    auditor tell a low-tier dispatch advertised-low apart from a floor default."""
+    """Provenance of declared_tier — one of:
+
+      "wire"                the worker's advertised per-tool tier (or the
+                            session high-water mark derived from it) escalated
+                            above the worker-wide floor
+      "floor"              the worker's risk_default floor (including the
+                            session floor ratchet, and every external_mcp
+                            worker, which is floor-only by contract)
+      "invalid_advertised"  the worker sent a malformed tier or a malformed
+                            meta container; the floor was used and the
+                            contract violation is flagged here
+      "unknown_worker"      no spec registered for this worker -> "high"
+      None                  control-plane rows, and pre-v1.6 entries
+
+    Forensic honesty: lets an auditor tell a low-tier dispatch advertised-low
+    apart from a floor default, and either apart from a tampering signal."""
     outcome: Outcome
     latency_ms: int
     session_guid: str

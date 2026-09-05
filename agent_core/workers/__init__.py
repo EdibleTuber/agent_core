@@ -1,10 +1,11 @@
-"""Worker contract: types, registry, risk gate, audit log, and
-conformance fixtures for MCP-based workers in agent_core consumers.
+"""Worker contract and runtime: types, registry, risk gate, audit log,
+conformance fixtures, and the live MCP client stack for MCP-based workers.
 
-The contract is intentionally framework-only — there is no live MCP
-client in v1.2.0. Consuming agents (PARE in Phase 1+) provide the
-transport; agent_core provides the data shapes and the verification
-suite their workers must pass.
+agent_core owns the transport (`MCPClient`, `MCPClientPool`), the enforcement
+wrapper (`RiskAwareToolPool`) and the runtime lifecycle (`WorkerManager`, which
+loads and unloads workers while the daemon runs); consuming agents supply the
+`workers.yaml` catalog and the operator surface. The conformance suite still
+defines what a worker must satisfy.
 """
 
 from agent_core.workers.client import MCPClient

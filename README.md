@@ -41,17 +41,24 @@ flowchart TB
 
 ### Worker discovery
 
-MCP workers are declared in `workers.yaml`. At startup `discover_and_register`
-connects each worker, lists its tools (capturing per-tool risk tiers from MCP
-`_meta`), and synthesizes a `Tool` subclass per tool that dispatches back through
-the pool. An unreachable worker is logged and skipped — the agent still starts.
+MCP workers are declared in `workers.yaml`. `WorkerManager` connects each worker,
+lists its tools (capturing per-tool risk tiers from MCP `_meta`), and synthesizes a
+`Tool` subclass per tool that dispatches back through the `RiskAwareToolPool`. An
+unreachable worker is logged and skipped — the agent still starts. `load_autoload()`
+is the boot path and `load()`/`unload()`/`reload()` the runtime one; they are the
+same code.
+
+`discover_and_register` is the deprecated boot-only predecessor (see the changelog);
+new code should use `WorkerManager`. Whichever you use, pass the `RiskAwareToolPool`,
+never the inner `MCPClientPool` — both accept the same calls, and the inner one gates,
+audits and records tiers for nothing.
 
 ```mermaid
 flowchart LR
     YAML["workers.yaml"] --> REG["WorkerRegistry.load"]
     REG --> SPECS["WorkerSpec list"]
-    SPECS --> DAR["discover_and_register(specs, pool)"]
-    DAR --> LT["per worker: pool.list_tools"]
+    SPECS --> DAR["WorkerManager.load / load_autoload"]
+    DAR --> LT["per worker: RiskAwareToolPool.list_tools"]
     LT --> MCP["MCPClientPool → stdio / streamable_http worker"]
     MCP -->|"tool defs + _meta risk tiers"| MTC["make_tool_class"]
     MTC --> TC["Tool subclasses"]
@@ -115,8 +122,8 @@ Overrides:
 - `system_prompt(self, ctx) -> str` — **required** (also `NotImplementedError` in the base).
 - `handle_command(self, msg, ctx)` — implement if you accept `/commands` (also a stub).
 - `setup(self)` — optional; construct domain resources (framework managers are already populated).
-- `register_tools(self)` — optional; return tool classes (e.g. from `discover_and_register`)
-  to expose MCP workers.
+- `register_tools(self)` — optional; return tool classes to expose MCP workers. Prefer
+  `WorkerManager` from `astartup()`; `discover_and_register` is deprecated.
 
 The terminal REPL (`agent_core.adapters.cli.run_repl`) is a **library, not an entry point**.
 Each agent ships its own launcher that calls `run_repl(config.socket_path, renderer)` with a
@@ -124,11 +131,12 @@ Each agent ships its own launcher that calls `run_repl(config.socket_path, rende
 
 ### Gotchas
 
-- **Worker discovery isn't resilient to unreachable workers (as of v1.6.0).**
-  `discover_and_register` runs workers sequentially; an unreachable `streamable_http` worker's
-  cancellation can cascade and cancel *sibling* workers' discovery, and closing clients logs a
-  noisy but harmless anyio "cancel scope" traceback. If a healthy worker isn't registering,
-  check whether an unreachable worker precedes it in the registry. Fix tracked for a later release.
+- **Deprecated `discover_and_register` isn't resilient to unreachable workers.**
+  It runs workers sequentially; an unreachable `streamable_http` worker's cancellation can
+  cascade and cancel *sibling* workers' discovery, and closing clients logs a noisy but
+  harmless anyio "cancel scope" traceback. If a healthy worker isn't registering, check
+  whether an unreachable worker precedes it in the registry. `WorkerManager.load_autoload`
+  gathers per worker and does not have this failure mode.
 
 ## Tests
 
