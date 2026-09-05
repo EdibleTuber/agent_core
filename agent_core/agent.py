@@ -113,6 +113,18 @@ class Agent:
         are already populated when this runs."""
         pass
 
+    async def astartup(self) -> None:
+        """Async startup, awaited by Daemon.serve() after the socket is bound
+        but before any connection is serviced.
+
+        This is where worker discovery belongs: it runs in the serving loop and
+        in a task that outlives the connections it opens, which is what the
+        MCP client's anyio cancel scopes require. Default no-op.
+        """
+
+    async def ashutdown(self) -> None:
+        """Async teardown, awaited when the daemon stops serving. Default no-op."""
+
     def system_prompt(self, ctx: HandlerContext) -> str:
         """Return the system prompt for this turn. Override per agent."""
         raise NotImplementedError
