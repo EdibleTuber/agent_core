@@ -84,6 +84,8 @@ async def test_astartup_completes_before_first_connection(tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await server_task
 
+    assert "ashutdown" in agent.events
+
     assert agent.events.index("astartup-end") < agent.events.index("connected"), (
         f"a connection was serviced before astartup finished: {agent.events}")
 
