@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from agent_core.tools.base import Tool
+from agent_core.workers.client_pool import describe_failure
 from agent_core.workers.registry import WorkerNotFoundError, WorkerRegistry
 from agent_core.workers.tool_factory import make_tool_class
 
@@ -64,7 +65,13 @@ def _artifact_args(spec) -> dict:
 ErrorKind = Literal[
     "unknown_worker", "spawn_failed", "connect_timeout", "protocol_mismatch",
     "tool_collision", "requires_unmet", "list_tools_failed", "disconnect_timeout",
+    "unreachable",
 ]
+"""`unreachable` is not a flavour of `spawn_failed`. A networked worker is a
+process we did not start, on a machine we may not own; telling the operator
+its spawn failed sends them to look for a subprocess that was never ours. The
+two need different actions -- check the binary here, versus check the host
+there -- so they get different names."""
 
 
 @dataclass
@@ -238,17 +245,31 @@ class WorkerManager:
             logger.warning("worker %s: add_spec failed: %s", name, message)
             return WorkerOpResult("load", name, False, error=message, error_kind="spawn_failed")
 
+        # Per-spec bound: a worker across a tailnet legitimately needs longer
+        # than one on this box, and a sleeping host does not refuse a
+        # connection -- it drops the SYN -- so this is what ends the wait.
+        connect_timeout = getattr(spec, "connect_timeout", None) or self._connect_timeout
         try:
-            await self._pool.connect(name, timeout=self._connect_timeout)
+            await self._pool.connect(name, timeout=connect_timeout)
         except asyncio.TimeoutError:
+            where = self._target(name)
             return await self._fail(name, "connect_timeout",
-                                    f"worker {name!r} did not connect within "
-                                    f"{self._connect_timeout}s")
+                                    f"worker {name!r} at {where} did not connect "
+                                    f"within {connect_timeout}s")
         except FileNotFoundError as exc:
             return await self._fail(name, "spawn_failed", str(exc))
         except Exception as exc:
-            kind = "protocol_mismatch" if "version" in str(exc).lower() else "spawn_failed"
-            return await self._fail(name, kind, f"{type(exc).__name__}: {exc}")
+            detail = describe_failure(exc)
+            if "version" in detail.lower():
+                kind: ErrorKind = "protocol_mismatch"
+            elif spec.transport == "stdio":
+                kind = "spawn_failed"
+            else:
+                # We never spawned it, so it cannot have failed to spawn.
+                kind = "unreachable"
+            if spec.transport != "stdio" and self._target(name) not in detail:
+                detail = f"{self._target(name)}: {detail}"
+            return await self._fail(name, kind, detail)
 
         try:
             listing = await self._pool.list_tools(name)
@@ -293,6 +314,16 @@ class WorkerManager:
                            name, exc_info=True)
         logger.info("loaded worker %s (%d tools)", name, len(names))
         return WorkerOpResult("load", name, True, tool_count=len(names), tools=names)
+
+    def _target(self, name: str) -> str:
+        """The endpoint or command this worker points at, for error text."""
+        target = getattr(self._pool, "target", None)
+        if callable(target):
+            try:
+                return target(name)
+            except Exception:      # a pool double is not required to have it
+                pass
+        return name
 
     async def _fail(self, name: str, kind: ErrorKind, message: str) -> WorkerOpResult:
         """Roll a partial load back to the unloaded state.

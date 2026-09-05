@@ -71,6 +71,20 @@ class WorkerSpec(BaseModel):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
+    connect_timeout: float | None = None
+    """Wall-clock bound on this worker's connect, in seconds. None uses the
+    pool default. Per-spec because a worker across a tailnet legitimately
+    needs longer than one on the same box, and because a sleeping host does
+    not refuse a connection -- it drops the SYN, so the bound is the only
+    thing that ends the wait."""
+
+    read_timeout: float | None = None
+    """Wall-clock bound on every REQUEST this worker answers -- initialize,
+    tools/list and each tools/call -- in seconds. None leaves the SDK's
+    default, which is no session-level bound at all and a 300s transport read.
+    Separate from connect_timeout because httpx times the dial and the
+    response read independently; one field cannot bound both."""
+
     autoload: bool = True
     """Connect this worker at daemon startup. False means declared-but-not-
     loaded: it appears in the catalog and can be loaded at runtime.
