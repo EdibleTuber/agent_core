@@ -16,6 +16,7 @@ import os
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from agent_core.workers.artifacts import PRODUCES_META_KEY, VALID_PRODUCES
 from agent_core.workers.client_pool import describe_failure
 from agent_core.workers.risk import RISK_TIER_META_KEY
 
@@ -56,6 +57,28 @@ def _assert_valid_risk_tier_meta(tool: Any) -> None:
     assert tier in _WIRE_VALID_TIERS, (
         f"tool {getattr(tool, 'name', tool)!r} must advertise a valid "
         f"{RISK_TIER_META_KEY!r} in _meta over the wire, got {tier!r}"
+    )
+
+
+def _assert_valid_produces_meta(tool: Any) -> None:
+    """Assert a live tool's `produces` declaration is one this daemon knows.
+
+    Unlike risk_tier, absent is valid here and means "result" -- `produces`
+    is optional, not mandatory, so a worker that advertises nothing must
+    pass. An unrecognised value that IS present is rejected at build/test
+    time for the same reason the risk tier is: dispatch falls back to the
+    safe reading, so nothing at runtime would ever surface the typo -- a tool
+    meaning to declare `artifact` and writing `ARTIFACT` would silently
+    stream its file contents as a tool result.
+    """
+    meta = getattr(tool, "meta", None) or {}
+    if not isinstance(meta, dict) or PRODUCES_META_KEY not in meta:
+        return
+    produces = meta[PRODUCES_META_KEY]
+    assert produces in VALID_PRODUCES, (
+        f"tool {getattr(tool, 'name', tool)!r} advertises "
+        f"{PRODUCES_META_KEY!r}={produces!r} in _meta, which is not one of "
+        f"{VALID_PRODUCES}"
     )
 
 
@@ -237,6 +260,7 @@ async def assert_streamable_http_conformance(endpoint: str) -> None:
             f"tool {tool.name!r} inputSchema missing top-level 'type'"
         )
         _assert_valid_risk_tier_meta(tool)
+        _assert_valid_produces_meta(tool)
 
 
 async def assert_stdio_conformance(spec: "WorkerSpec") -> None:
@@ -314,6 +338,7 @@ async def assert_stdio_conformance(spec: "WorkerSpec") -> None:
                 f"tool {tool.name!r} inputSchema missing top-level 'type'"
             )
             _assert_valid_risk_tier_meta(tool)
+            _assert_valid_produces_meta(tool)
     finally:
         try:
             await client.close()
