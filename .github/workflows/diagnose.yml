@@ -40,19 +40,25 @@ jobs:
           echo "--- proxy env ---"; env | grep -iE "proxy|^CI=" || echo "(none)"
           echo "--- cpus ---"; nproc
 
-      - name: "which file breaks them"
+      - name: "which TEST in test_client_pool.py breaks them"
         continue-on-error: true
         run: |
           T1=tests/workers/test_conformance_streamable_http.py::test_streamable_http_fixture_passes_conformance
           T2=tests/workers/test_discovery.py::test_discover_returns_tool_classes_from_live_fixture
-          echo "baseline (the two alone):"
-          pytest -q $T1 $T2 >/dev/null 2>&1 && echo "  BASELINE=PASS" || echo "  BASELINE=FAIL"
-          echo
-          for f in tests/workers/test_*.py; do
-            case "$f" in *test_conformance_streamable_http.py|*test_discovery.py) continue;; esac
-            if pytest -q "$f" $T1 $T2 >/dev/null 2>&1; then
-              echo "  ok      $f"
+          for t in test_pool_lazy_connects_and_reuses test_pool_call_tool_via_pool \
+                   test_pool_unknown_worker_raises test_pool_works_with_stdio_spec \
+                   test_pool_mixed_transports; do
+            if pytest -q "tests/workers/test_client_pool.py::$t" $T1 $T2 >/dev/null 2>&1; then
+              echo "  ok      $t"
             else
-              echo "  BREAKS  $f"
+              echo "  BREAKS  $t"
             fi
           done
+
+      - name: "lingering tasks and subprocesses after the culprit"
+        continue-on-error: true
+        run: |
+          T1=tests/workers/test_conformance_streamable_http.py::test_streamable_http_fixture_passes_conformance
+          pytest -q -s tests/workers/test_client_pool.py $T1 2>&1 \
+            | grep -iE "Task was destroyed|pending|exceeded|cancel scope|subprocess|Event loop" \
+            | head -40 || true
