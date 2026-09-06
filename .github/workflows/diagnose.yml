@@ -19,19 +19,27 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip && pip install -e ".[dev]"
       - name: environment facts
+        continue-on-error: true          # never let facts block the traces
         run: |
-          python -c "import sys, platform; print('python', sys.version)"
-          python -c "import uvicorn, anyio, mcp, fastmcp, starlette, httpx; print('uvicorn', uvicorn.__version__, '| anyio', anyio.__version__, '| starlette', starlette.__version__, '| httpx', httpx.__version__)"
           python - <<'PY'
+          import importlib.metadata as md, sys
+          print("python", sys.version)
+          for pkg in ("uvicorn", "anyio", "mcp", "fastmcp", "starlette",
+                      "httpx", "httptools", "uvloop", "h11", "sse-starlette"):
+              try:
+                  print(f"  {pkg:14} {md.version(pkg)}")
+              except Exception as exc:
+                  print(f"  {pkg:14} ABSENT ({type(exc).__name__})")
           import uvicorn
           from tests.workers.fixtures import build_stub
           c = uvicorn.Config(build_stub().http_app(), host="127.0.0.1", port=0)
           c.load()
           print("http impl :", c.http_protocol_class.__module__)
-          print("ws impl   :", c.ws_protocol_class)
+          print("loop      :", c.loop)
           PY
           echo "--- proxy env ---"; env | grep -iE "proxy|^CI=" || echo "(none)"
           echo "--- cpus ---"; nproc
+
       - name: the two failing tests, with a server-side trace
         env:
           AGENT_CORE_FIXTURE_TRACE: "1"
