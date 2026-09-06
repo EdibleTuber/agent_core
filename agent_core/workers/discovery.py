@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from typing import TYPE_CHECKING
 
 from agent_core.tools.base import Tool
+from agent_core.workers.client_pool import describe_failure
 from agent_core.workers.tool_factory import make_tool_class
 from agent_core.workers.types import WorkerSpec
 
@@ -38,6 +40,15 @@ if TYPE_CHECKING:
     from agent_core.workers.risk_pool import RiskAwareToolPool
 
 logger = logging.getLogger(__name__)
+
+DISCOVERY_TIMEOUT = float(os.environ.get("AGENT_CORE_DISCOVERY_TIMEOUT", "30"))
+"""Bound on one worker's tools/list during discovery, in seconds.
+
+Its job is to stop one wedged worker from hanging startup, not to assert how
+fast a worker answers. The previous 2.0s was tight enough to fail on a busy
+shared runner while a local tools/list measures ~0.006s -- a bound doubling as
+a benchmark fails for reasons unrelated to what it guards.
+"""
 
 
 async def discover_and_register(
@@ -62,17 +73,23 @@ async def discover_and_register(
     tool_classes: list[type[Tool]] = []
     for spec in specs:
         try:
-            list_result = await asyncio.wait_for(pool.list_tools(spec.name), timeout=2.0)
+            list_result = await asyncio.wait_for(
+                pool.list_tools(spec.name), timeout=DISCOVERY_TIMEOUT)
         except asyncio.CancelledError:
             # Never absorb a cancellation: continuing the loop inside a task
             # that is already cancelling makes every later await re-raise, which
             # presents as one dead worker killing its siblings' discovery.
             raise
         except Exception as exc:
+            # The TYPE, not just the message. asyncio.wait_for raises
+            # TimeoutError, whose str() is EMPTY -- so this line used to read
+            # "worker stub discovery failed ()", which told an operator
+            # staring at a red CI run precisely nothing about whether the
+            # worker was slow, unreachable, or erroring.
             logger.warning(
                 "worker %s discovery failed (%s); skipping registration",
                 spec.name,
-                exc,
+                describe_failure(exc),
             )
             continue
 
