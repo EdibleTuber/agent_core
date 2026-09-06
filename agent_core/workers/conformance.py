@@ -11,6 +11,7 @@ message.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -150,77 +151,78 @@ async def assert_streamable_http_conformance(endpoint: str) -> None:
     from agent_core.workers.client import MCPClient
 
     client = MCPClient(endpoint)
-    exc_to_raise: AssertionError | None = None
-    stage = "connect"
-    tools = None
-    try:
-        # ONE cancel scope, and it must span close() as well as connect().
-        #
-        # This is not tidying. anyio requires cancel scopes to be exited in
-        # the same task and in LIFO order. connect() deliberately LEAVES the
-        # transport's anyio scope open -- that is its contract, the connection
-        # has to outlive the call -- and close() is what exits it. So any
-        # asyncio cancel scope that OPENS before connect() and CLOSES before
-        # close() interleaves with it instead of nesting:
-        #
-        #     wait_for(connect())   ->  [T1 open, transport open, T1 CLOSE]
-        #     wait_for(initialize())->  [T2 open ... T2 close]
-        #     close()               ->  transport close
-        #
-        # That is the same class of hazard the connection-owner-task design
-        # exists to avoid, and it is why the timeout below wraps the try/finally
-        # rather than sitting inside it.
-        #
-        # The observable cost was two tests failing only on CI -- passing here
-        # across anyio 4.14/4.15, Python 3.12.3/3.12.14, with and without
-        # httptools and uvloop -- which is how a scheduling-sensitive
-        # cancellation bug presents.
-        async with asyncio.timeout(CONFORMANCE_TIMEOUT):
+    state = {"stage": "connect", "tools": None}
+
+    async def _drive() -> None:
+        """The entire client lifecycle, in ONE task.
+
+        Everything the transport opens is also closed here, so its anyio
+        scopes are entered and exited in the same task -- the invariant anyio
+        actually enforces.
+        """
+        try:
+            await client.connect()
+            state["stage"] = "initialize"
+            await client.initialize()
+            state["stage"] = "list_tools"
+            result = await client.list_tools()
+            state["tools"] = getattr(result, "tools", None)
+        finally:
             try:
-                await client.connect()
-                stage = "initialize"
-                await client.initialize()
-                stage = "list_tools"
-                list_result = await client.list_tools()
-                tools = getattr(list_result, "tools", None)
-            finally:
-                stage_at_close, stage = stage, "close"
-                try:
-                    await client.close()
-                except (Exception, asyncio.CancelledError):
-                    # Cleanup failure must not mask the real finding; a
-                    # connection that never fully established cannot close
-                    # cleanly, and that is not what this check is about.
-                    pass
-                stage = stage_at_close
-    except asyncio.TimeoutError:
-        exc_to_raise = AssertionError(
-            f"streamable_http_conformance: {stage} exceeded "
+                await client.close()
+            except (Exception, asyncio.CancelledError):
+                # A connection that never established cannot close cleanly,
+                # and that is not what this check is about.
+                pass
+
+    # The bound OBSERVES the work; it does not wrap it in a cancel scope.
+    #
+    # This matters, and cost four CI runs to establish. Nine other tests drive
+    # this same fixture with no asyncio timeout and pass on CI. The only two
+    # that failed were the only two that imposed one -- and restructuring the
+    # scope so it nested correctly around connect/close did NOT help, which
+    # rules out simple LIFO ordering and points at the cancel scope itself.
+    # asyncio.timeout cancels from OUTSIDE an anyio scope it knows nothing
+    # about; asyncio.wait just watches a task, and cancellation, if needed, is
+    # delivered INTO that task -- the sanctioned way to abort a partially
+    # entered anyio scope, and the same pattern MCPClientPool._cancel_owner
+    # already uses for exactly this reason.
+    task = asyncio.create_task(_drive(), name=f"conformance:{endpoint}")
+    done, _ = await asyncio.wait({task}, timeout=CONFORMANCE_TIMEOUT)
+
+    if not done:
+        task.cancel()
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.wait({task}, timeout=5)
+        raise AssertionError(
+            f"streamable_http_conformance: {state['stage']} exceeded "
             f"{CONFORMANCE_TIMEOUT}s for {endpoint!r}. The server accepted the "
             f"connection but never completed the response; check the server's "
             f"own log for a handler that returned early."
         )
-    except asyncio.CancelledError as exc:
+
+    if task.cancelled():
         # NOT a timeout, and conflating the two cost real debugging time: an
         # MCP transport whose background task dies cancels its caller, so a
-        # server-side failure arrives here as a bare CancelledError.
-        exc_to_raise = AssertionError(
-            f"streamable_http_conformance: {stage} was cancelled for "
+        # server-side failure arrives as a bare CancelledError -- which ends
+        # the task CANCELLED, not merely failed. Task.exception() re-raises
+        # for a cancelled task rather than returning, so this must be checked
+        # first; doing it the other way round turned an unreachable endpoint
+        # from a clean AssertionError into an escaping CancelledError.
+        raise AssertionError(
+            f"streamable_http_conformance: {state['stage']} was cancelled for "
             f"{endpoint!r} (the transport's task group failed, which usually "
-            f"means the server errored): {describe_failure(exc)}"
-        )
-    except Exception as exc:
-        exc_to_raise = AssertionError(
-            f"streamable_http_conformance: {stage} failed for {endpoint!r}: "
-            f"{describe_failure(exc)}"
+            f"means the server errored -- or the endpoint is unreachable)"
         )
 
-    if exc_to_raise is not None:
-        raise exc_to_raise
+    exc = task.exception()
+    if exc is not None:
+        raise AssertionError(
+            f"streamable_http_conformance: {state['stage']} failed for "
+            f"{endpoint!r}: {describe_failure(exc)}"
+        )
 
-    # Validation runs after the connection is closed and outside the timeout:
-    # it is pure CPU over an already-fetched result, so bounding it would only
-    # add a way for a slow machine to fail a check about tool metadata.
+    tools = state["tools"]
     assert tools is not None, "list_tools returned no .tools attribute"
     assert isinstance(tools, list), f"tools is not a list: {type(tools).__name__}"
 
