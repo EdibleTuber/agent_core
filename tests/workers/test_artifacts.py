@@ -86,3 +86,45 @@ def test_the_error_names_the_worker_and_tool():
     with pytest.raises(DescriptorError) as e:
         validate_descriptor({}, worker="hardware", tool="dump_firmware")
     assert "hardware" in str(e.value) and "dump_firmware" in str(e.value)
+
+
+# Task 4: Slug validation tests
+from agent_core.workers.artifacts import validate_slug
+
+
+@pytest.mark.parametrize("ok", ["router-b", "a", "proj_2", "a" * 64,
+                                "0target", "fw-dump_2026"])
+def test_a_legal_slug_passes(ok):
+    assert validate_slug(ok) == ok
+
+
+@pytest.mark.parametrize("bad", [
+    "proj/../../etc",     # traversal — the reason fullmatch is used
+    "../etc",
+    "a/b",
+    "-rf",                # a leading dash is argument injection into scp/tar
+    "--checkpoint-action=exec=sh",
+    "_leading",           # ArcticBase requires a leading alphanumeric
+    "UPPER",
+    "has space",
+    "a" * 65,             # ArcticBase caps at 64
+    "",
+    "Ünïcode",
+])
+def test_an_illegal_slug_is_rejected(bad):
+    with pytest.raises(ValueError, match="slug"):
+        validate_slug(bad)
+
+
+def test_the_rule_matches_arcticbase_exactly():
+    """The slug names a workbench, a capture store and a directory on the bench
+    drive. ArcticBase is the strictest consumer, so its rule is the shared one:
+    a project accepted here but rejected there would silently have no
+    workbench."""
+    from agent_core.workers.artifacts import SLUG_RE
+    assert SLUG_RE.pattern == r"[a-z0-9][a-z0-9_-]{0,63}"
+
+
+def test_a_non_string_is_rejected():
+    with pytest.raises(ValueError, match="slug"):
+        validate_slug(None)
