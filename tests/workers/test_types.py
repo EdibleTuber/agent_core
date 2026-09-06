@@ -167,3 +167,45 @@ def test_worker_spec_endpoint_field_optional_at_field_level():
     specs can omit it. The transport↔fields invariant is in the validator."""
     fields = WorkerSpec.model_fields
     assert fields["endpoint"].is_required() is False
+
+
+def _spec(**kw):
+    base = dict(name="hardware", transport="stdio", command="/bin/true",
+                risk_default="high")
+    base.update(kw)
+    return WorkerSpec(**base)
+
+
+def test_artifact_root_defaults_to_none():
+    assert _spec().artifact_root is None
+    assert _spec().artifact_drive_id is None
+
+
+def test_artifact_root_must_be_absolute():
+    """Containment is checked against this root; a relative path cannot be
+    compared against one."""
+    with pytest.raises(ValidationError, match="absolute"):
+        _spec(artifact_root="bench-store")
+
+
+def test_a_typo_in_workers_yaml_is_an_error_not_a_silent_drop():
+    """pydantic's default extra='ignore' meant an older agent_core silently
+    dropped a key it did not know. For autoload that was a documented
+    annoyance; for artifact_root it would mean a security control absent with
+    no error anywhere."""
+    with pytest.raises(ValidationError):
+        _spec(artifact_roots="/mnt/bench-store")
+
+
+def test_the_real_workers_yaml_still_loads():
+    """extra='forbid' is a behaviour change for every consumer. This is the
+    canary: PARE's live catalog must still parse."""
+    from pathlib import Path
+
+    from agent_core.workers.registry import WorkerRegistry
+
+    live = Path("/mnt/secondary/projects/PARE/workers.yaml")
+    if not live.is_file():
+        pytest.skip("PARE checkout not present next to agent_core")
+    reg = WorkerRegistry.load(live)
+    assert reg.all(), "the live catalog parsed to nothing"

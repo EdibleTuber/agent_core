@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 WORKER_CONTRACT_VERSION = 1
@@ -58,6 +58,17 @@ class WorkerError(BaseModel):
 
 class WorkerSpec(BaseModel):
     """A single worker entry from workers.yaml."""
+
+    model_config = ConfigDict(extra="forbid")
+    """An unknown key is an ERROR, not a silent drop.
+
+    pydantic's default extra="ignore" meant an older agent_core reading a
+    newer workers.yaml quietly discarded keys it did not understand. That was
+    a documented annoyance for `autoload`. It is not acceptable for
+    `artifact_root`, which is a security control: a dropped root would leave
+    descriptor containment silently unenforced with no error anywhere.
+    """
+
     name: str
     endpoint: str | None = None
     transport: Transport
@@ -89,11 +100,37 @@ class WorkerSpec(BaseModel):
     """Connect this worker at daemon startup. False means declared-but-not-
     loaded: it appears in the catalog and can be loaded at runtime.
 
-    NOTE: WorkerSpec does not set model_config, so pydantic's default
-    extra="ignore" applies — an OLDER agent_core reading a workers.yaml that
-    sets autoload: false silently drops the field and autoloads the worker
-    anyway. Consumers must bump their agent_core pin before adding the key.
+    NOTE: an OLDER agent_core (pre model_config extra="forbid") reading a
+    workers.yaml that sets autoload: false silently dropped the field and
+    autoloaded the worker anyway. Consumers must bump their agent_core pin
+    before adding the key.
     """
+
+    artifact_root: str | None = None
+    """Absolute directory on the WORKER's machine under which that worker may
+    write artifacts. Operator-declared here, in workers.yaml, because the trust
+    anchor has to be the file the worker cannot touch -- the same reasoning as
+    the risk pins.
+
+    None means the worker may not produce artifacts at all: a
+    produces="artifact" dispatch against a worker with no root is REFUSED
+    rather than accepted unvalidated.
+    """
+
+    artifact_drive_id: str | None = None
+    """Expected contents of `{artifact_root}/.bench-store-id`.
+
+    os.path.ismount() cannot tell one project's removable drive from another's,
+    so writing a dump to the wrong stick would otherwise be silent.
+    """
+
+    @field_validator("artifact_root")
+    @classmethod
+    def artifact_root_is_absolute(cls, v: str | None) -> str | None:
+        if v is not None and not v.startswith("/"):
+            raise ValueError(
+                f"artifact_root must be an absolute path, got {v!r}")
+        return v
 
     @field_validator("name")
     @classmethod
