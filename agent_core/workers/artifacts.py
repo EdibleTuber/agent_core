@@ -62,3 +62,27 @@ def validate_descriptor(payload, *, worker: str, tool: str) -> dict:
             f"{where}: descriptor path must be absolute, got {path!r}")
 
     return dict(payload)
+
+
+SLUG_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+"""ArcticBase's own rule, verbatim (its storage layer enforces the anchored
+form). Adopted rather than invented because the slug names three things -- a
+workbench, a capture store and a directory on the bench drive -- and the
+strictest consumer has to win. A project accepted here but rejected there
+would silently have no approval or report surface at all.
+
+Note `fullmatch` below, not `match`: an unanchored check accepts
+`proj/../../etc`, which is the single most common way this is written wrong.
+The leading-alphanumeric requirement is what keeps a slug out of
+argument-injection range in the scp/tar commands an operator later runs by
+hand -- `-rf` and `--checkpoint-action=exec=sh` are legal directory names.
+"""
+
+
+def validate_slug(slug) -> str:
+    """The project slug supplied to a worker. Raises ValueError if unusable."""
+    if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
+        raise ValueError(
+            f"invalid project slug {slug!r}: must match {SLUG_RE.pattern!r} "
+            f"(lowercase, starts alphanumeric, max 64 chars)")
+    return slug
