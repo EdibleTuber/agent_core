@@ -570,6 +570,11 @@ class MCPClientPool:
         return self._clients[worker]
 
     # --- dispatch ---------------------------------------------------------
+    async def ping(self, worker: str):
+        """Liveness probe against an already-connected worker."""
+        client = await self._ensure_connected(worker)
+        return await client.ping()
+
     async def list_tools(self, worker: str):
         client = await self._ensure_connected(worker)
         return await client.list_tools()
