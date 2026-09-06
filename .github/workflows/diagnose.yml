@@ -40,25 +40,29 @@ jobs:
           echo "--- proxy env ---"; env | grep -iE "proxy|^CI=" || echo "(none)"
           echo "--- cpus ---"; nproc
 
-      - name: "which TEST in test_client_pool.py breaks them"
+      - name: "the minimal failing pair, WITH the server-side trace"
         continue-on-error: true
+        env:
+          AGENT_CORE_FIXTURE_TRACE: "1"
+          AGENT_CORE_CONFORMANCE_TIMEOUT: "8"
         run: |
-          T1=tests/workers/test_conformance_streamable_http.py::test_streamable_http_fixture_passes_conformance
-          T2=tests/workers/test_discovery.py::test_discover_returns_tool_classes_from_live_fixture
-          for t in test_pool_lazy_connects_and_reuses test_pool_call_tool_via_pool \
-                   test_pool_unknown_worker_raises test_pool_works_with_stdio_spec \
-                   test_pool_mixed_transports; do
-            if pytest -q "tests/workers/test_client_pool.py::$t" $T1 $T2 >/dev/null 2>&1; then
-              echo "  ok      $t"
-            else
-              echo "  BREAKS  $t"
-            fi
-          done
+          pytest -q -s \
+            tests/workers/test_client_pool.py::test_pool_mixed_transports \
+            tests/workers/test_conformance_streamable_http.py::test_streamable_http_fixture_passes_conformance \
+            2>&1 | grep -vE "^DEBUG|^INFO" | tail -60
 
-      - name: "lingering tasks and subprocesses after the culprit"
+      - name: "leftovers after the culprit test"
         continue-on-error: true
         run: |
-          T1=tests/workers/test_conformance_streamable_http.py::test_streamable_http_fixture_passes_conformance
-          pytest -q -s tests/workers/test_client_pool.py $T1 2>&1 \
-            | grep -iE "Task was destroyed|pending|exceeded|cancel scope|subprocess|Event loop" \
-            | head -40 || true
+          python - <<'PY'
+          import asyncio, subprocess, sys
+          # Run the culprit alone, then report what is still alive.
+          r = subprocess.run([sys.executable, "-m", "pytest", "-q",
+                              "tests/workers/test_client_pool.py::test_pool_mixed_transports"],
+                             capture_output=True, text=True)
+          print("culprit alone:", r.stdout.strip().splitlines()[-1] if r.stdout else "?")
+          PY
+          echo "--- stray stdio_stub processes ---"
+          pgrep -af "stdio_stub" || echo "(none)"
+          echo "--- sockets in TIME_WAIT / lingering on loopback ---"
+          ss -tan 2>/dev/null | awk 'NR==1 || /127.0.0.1/' | head -20 || echo "(ss unavailable)"
