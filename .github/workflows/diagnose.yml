@@ -40,30 +40,19 @@ jobs:
           echo "--- proxy env ---"; env | grep -iE "proxy|^CI=" || echo "(none)"
           echo "--- cpus ---"; nproc
 
-      - name: "SCOPE 1 - the two tests alone"
+      - name: "which file breaks them"
         continue-on-error: true
         run: |
-          pytest -q tests/workers/test_conformance_streamable_http.py::test_streamable_http_fixture_passes_conformance \
-                    tests/workers/test_discovery.py::test_discover_returns_tool_classes_from_live_fixture \
-            && echo "SCOPE1=PASS" || echo "SCOPE1=FAIL"
-
-      - name: "SCOPE 2 - tests/workers only"
-        continue-on-error: true
-        run: |
-          pytest -q tests/workers \
-            && echo "SCOPE2=PASS" || echo "SCOPE2=FAIL"
-
-      - name: "SCOPE 3 - the whole suite"
-        continue-on-error: true
-        run: |
-          pytest -q tests \
-            && echo "SCOPE3=PASS" || echo "SCOPE3=FAIL"
-
-      - name: "SCOPE 4 - whole suite, but the two run FIRST"
-        continue-on-error: true
-        run: |
-          pytest -q \
-            tests/workers/test_conformance_streamable_http.py \
-            tests/workers/test_discovery.py \
-            tests \
-            && echo "SCOPE4=PASS" || echo "SCOPE4=FAIL"
+          T1=tests/workers/test_conformance_streamable_http.py::test_streamable_http_fixture_passes_conformance
+          T2=tests/workers/test_discovery.py::test_discover_returns_tool_classes_from_live_fixture
+          echo "baseline (the two alone):"
+          pytest -q $T1 $T2 >/dev/null 2>&1 && echo "  BASELINE=PASS" || echo "  BASELINE=FAIL"
+          echo
+          for f in tests/workers/test_*.py; do
+            case "$f" in *test_conformance_streamable_http.py|*test_discovery.py) continue;; esac
+            if pytest -q "$f" $T1 $T2 >/dev/null 2>&1; then
+              echo "  ok      $f"
+            else
+              echo "  BREAKS  $f"
+            fi
+          done
