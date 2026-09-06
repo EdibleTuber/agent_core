@@ -128,3 +128,29 @@ def test_the_rule_matches_arcticbase_exactly():
 def test_a_non_string_is_rejected():
     with pytest.raises(ValueError, match="slug"):
         validate_slug(None)
+
+
+# Fix Round 1: Host validation in descriptor
+@pytest.mark.parametrize("bad", [
+    "-oProxyCommand=sh",      # a leading dash is an ssh ARGUMENT, not a host
+    "--rsh=sh",
+    "x;rm -rf /",
+    "host:/etc/shadow",       # a colon forges scp's host:path split
+    "has space",
+    "a" * 254,
+    "", None, 123, True,
+])
+def test_a_host_that_is_not_a_hostname_is_rejected(bad):
+    """The descriptor is retrieved with `scp <host>:<path>`, so host is as much
+    a part of that command as path is."""
+    payload = dict(_GOOD, host=bad)
+    with pytest.raises(DescriptorError, match="host"):
+        validate_descriptor(payload, worker="hardware", tool="dump_firmware")
+
+
+@pytest.mark.parametrize("ok", ["pare-bench", "100.68.47.23", "a",
+                                "bench.local", "host_1"])
+def test_a_real_host_passes(ok):
+    out = validate_descriptor(dict(_GOOD, host=ok), worker="hardware",
+                              tool="dump_firmware")
+    assert out["host"] == ok

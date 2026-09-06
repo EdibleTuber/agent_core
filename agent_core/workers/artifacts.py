@@ -21,6 +21,16 @@ VALID_PRODUCES = (PRODUCES_RESULT, PRODUCES_ARTIFACT)
 
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
+_HOST_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,252}\Z")
+"""A hostname or IP that will be interpolated into `scp <host>:<path>`.
+
+Leading-alphanumeric for the same reason the slug rule requires it: a host
+beginning with `-` is an ssh/scp ARGUMENT, not a destination, and
+`-oProxyCommand=...` is remote code execution on the operator's own machine.
+No colon, so it cannot forge the host:path split; no whitespace or shell
+metacharacters. Max 253 characters to comply with DNS hostname limits.
+"""
+
 _REQUIRED = ("host", "path", "size", "sha256")
 
 
@@ -60,6 +70,12 @@ def validate_descriptor(payload, *, worker: str, tool: str) -> dict:
     if not isinstance(path, str) or not path.startswith("/"):
         raise DescriptorError(
             f"{where}: descriptor path must be absolute, got {path!r}")
+
+    host = payload["host"]
+    if not isinstance(host, str) or not _HOST_RE.match(host):
+        raise DescriptorError(
+            f"{where}: descriptor host must be a hostname or address, "
+            f"got {host!r}")
 
     return dict(payload)
 
