@@ -47,6 +47,21 @@ call that ignores cancellation) can make the cleanup that follows a timeout
 hang forever. Best-effort — see the module docstring."""
 
 
+def _server_info_of(init_result) -> dict:
+    """Pull name/version/protocol out of an MCP InitializeResult.
+
+    Defensive throughout: this runs on the connect path, and a worker that
+    returns something unexpected must not fail an otherwise-good load.
+    """
+    info = getattr(init_result, "serverInfo", None)
+    out = {
+        "server_name": getattr(info, "name", None),
+        "server_version": getattr(info, "version", None),
+        "protocol_version": getattr(init_result, "protocolVersion", None),
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
 def _leaves(exc: BaseException) -> list[BaseException]:
     """Flatten an ExceptionGroup to the exceptions that actually happened."""
     if isinstance(exc, BaseExceptionGroup):
@@ -115,6 +130,11 @@ class MCPClientPool:
     def __init__(self, specs: list[WorkerSpec]) -> None:
         self._specs: dict[str, WorkerSpec] = {s.name: s for s in specs}
         self._clients: dict[str, MCPClient] = {}
+        # What the worker said it was at the last successful initialize.
+        # For a networked worker this is the ONLY provenance available: the
+        # daemon did not spawn the process and cannot stat its binary, so
+        # _artifact_args records None for every file field. See server_info().
+        self._server_info: dict[str, dict] = {}
         self._owners: dict[str, asyncio.Task] = {}
         self._ready: dict[str, asyncio.Event] = {}
         self._stop: dict[str, asyncio.Event] = {}
@@ -163,6 +183,18 @@ class MCPClientPool:
         frame = getattr(gen, "ag_frame", None)
         proc = frame.f_locals.get("process") if frame is not None else None
         return getattr(proc, "pid", None)
+
+    def server_info(self, worker: str) -> dict | None:
+        """What the worker reported at initialize: name, version, protocol.
+
+        This is the closest thing a NETWORKED worker has to the mtime/size an
+        stdio worker's binary provides. It is not equivalent -- a worker
+        controls what it reports, so it proves nothing against a hostile
+        server -- but it turns "no provenance at all" into a value that
+        changes when the remote build changes, which is what makes an
+        unannounced restart or redeploy visible in the audit log.
+        """
+        return self._server_info.get(worker)
 
     def target(self, worker: str) -> str:
         """What this worker's connection actually points at, for error text.
@@ -261,7 +293,8 @@ class MCPClientPool:
             pid = self._pid_of(client)
             if pid is not None:
                 self._pids[worker] = pid
-            await client.initialize()
+            init = await client.initialize()
+            self._server_info[worker] = _server_info_of(init)
         except BaseException as exc:      # includes CancelledError on timeout
             self._errors[worker] = exc
             self._ready[worker].set()
@@ -291,6 +324,10 @@ class MCPClientPool:
             await self._stop[worker].wait()
         finally:
             self._clients.pop(worker, None)
+            # Identity belongs to the CONNECTION, not the worker name. Keeping
+            # it past disconnect would let a stale row claim provenance for a
+            # process that is gone.
+            self._server_info.pop(worker, None)
             # Best-effort: a wedged worker must not keep the daemon from
             # completing the unload. WorkerManager bounds and hard-kills.
             with contextlib.suppress(BaseException):

@@ -30,7 +30,7 @@ DEFAULT_CONNECT_TIMEOUT = 10.0
 DEFAULT_DISCONNECT_TIMEOUT = 5.0
 
 
-def _artifact_args(spec) -> dict:
+def _artifact_args(spec, server_info: dict | None = None) -> dict:
     """Resolve the worker's binary and stat it, for the audit row.
 
     Spec section 7 requires a lifecycle row to carry "the resolved `command`
@@ -51,6 +51,16 @@ def _artifact_args(spec) -> dict:
             resolved = None
     args = {"command": command, "resolved_command": resolved,
             "command_mtime": None, "command_size": None}
+    # A networked worker has NO file to stat: the daemon did not spawn it and
+    # may not even share a filesystem with it, so every field above stays None
+    # -- which meant the artifact-swap attestation this function exists for
+    # silently did not exist for exactly the workers the networked-worker
+    # design creates. What the worker reported at initialize is not equivalent
+    # (it is self-reported, so it proves nothing against a hostile server) but
+    # it changes when the remote build changes, which turns nothing into
+    # something an auditor can compare across loads.
+    if spec.transport != "stdio" and server_info:
+        args.update(server_info)
     if resolved:
         try:
             st = os.stat(resolved)
@@ -306,7 +316,8 @@ class WorkerManager:
                                       args={"action": action,
                                             "transport": spec.transport,
                                             "tool_count": len(names),
-                                            **_artifact_args(spec)})
+                                            **_artifact_args(
+                                                spec, self._server_info(name))})
         except Exception:
             # A lifecycle audit row is not worth failing an otherwise-good
             # load over (real disk I/O — AuditLog.append can raise OSError).
@@ -314,6 +325,18 @@ class WorkerManager:
                            name, exc_info=True)
         logger.info("loaded worker %s (%d tools)", name, len(names))
         return WorkerOpResult("load", name, True, tool_count=len(names), tools=names)
+
+    def _server_info(self, name: str) -> dict | None:
+        """Worker-reported identity, if the pool tracks it (test doubles may
+        not). Never raises: provenance is best-effort and must not fail a
+        load."""
+        getter = getattr(self._pool, "server_info", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter(name)
+        except Exception:
+            return None
 
     def _target(self, name: str) -> str:
         """The endpoint or command this worker points at, for error text."""
