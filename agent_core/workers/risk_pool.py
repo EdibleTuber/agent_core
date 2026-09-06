@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from agent_core.workers.audit import AuditLog
 from agent_core.workers.client_pool import MCPClientPool
 from agent_core.workers.risk import RiskGate, RISK_TIER_META_KEY, resolve_declared_tier
+from agent_core.workers.types import WORKER_CONTRACT_VERSION
 from agent_core.workers.tool_approval import (
     ToolApprovalRegistry, ToolCallSpec, ToolDecision,
 )
@@ -139,6 +140,47 @@ class RiskAwareToolPool:
     def spec_for(self, worker: str):
         """Read through to the inner pool — one source of truth for specs."""
         return self._inner.spec(worker)
+
+    def server_info(self, worker: str) -> dict | None:
+        """Read through to the inner pool -- one source of truth for identity."""
+        getter = getattr(self._inner, "server_info", None)
+        return getter(worker) if callable(getter) else None
+
+    def _is_local(self, worker: str) -> bool:
+        """True when the KERNEL guarantees this worker cannot be replaced
+        without us noticing.
+
+        For stdio it does: the daemon spawned the child and holds its pipe, so
+        the process behind a connection cannot change without a reload, and a
+        reload bumps the generation. For anything networked it does not -- a
+        Pi can reboot, a systemd unit can restart, a container can be
+        redeployed, and none of it reaches the daemon.
+
+        Unknown workers count as NOT local: fail closed.
+        """
+        spec = self.spec_for(worker)
+        return getattr(spec, "transport", None) == "stdio"
+
+    def _bump_on_link_loss(self, worker: str) -> bool:
+        """Treat a transport failure on a networked worker as a possible
+        restart, and evict its session approvals.
+
+        Generation-keyed approvals were a property of LOCAL PROCESS OWNERSHIP,
+        not of the keying itself: every _bump call site is daemon-driven
+        (add_spec, remove_spec, close_all), which is sound only while the
+        daemon is the only thing that can change the process. Over HTTP it is
+        not. Without this, a `scope: session` approval survives onto a
+        DIFFERENT PROCESS -- dispatching with no prompt and an audit row
+        reading hitl_approved / session-approved.
+
+        The cost is deliberate and one-directional: after a network blip an
+        operator re-approves. That is the right side to err on, because the
+        failure it replaces is silent.
+        """
+        if self._is_local(worker):
+            return False
+        self._bump(worker)
+        return True
 
     def generation(self, worker: str) -> int:
         return self._generations.get(worker, 0)
@@ -254,7 +296,7 @@ class RiskAwareToolPool:
             request_id=uuid.uuid4().hex, worker=worker, tool=None,
             args=args or {}, declared_tier="low", effective_tier="low",
             override_reason=None, detail=detail, outcome=action,
-            latency_ms=0, session_guid="pending", worker_contract_version=1,
+            latency_ms=0, session_guid="pending", worker_contract_version=WORKER_CONTRACT_VERSION,
             tier_source=None,
         ))
 
@@ -429,15 +471,28 @@ class RiskAwareToolPool:
         try:
             result = await self._inner.call_tool(worker, tool, arguments)
         except asyncio.CancelledError:
+            evicted = self._bump_on_link_loss(worker)
             self._emit(worker, tool, snapshot, declared, effective,
                        int((time.monotonic() - start) * 1000),
-                       "cancelled", gate_override, "worker disconnected mid-dispatch",
+                       "cancelled", gate_override,
+                       "worker disconnected mid-dispatch"
+                       + (" (approvals evicted: link loss on a networked "
+                          "worker may mean a restarted process)" if evicted else ""),
                        tier_source)
             raise
         except Exception as exc:
+            # A tool that merely FAILS comes back as a result with isError set,
+            # not as an exception -- FastMCP only raises on protocol/transport
+            # trouble. So reaching here on a networked worker means the link
+            # itself misbehaved, which is indistinguishable from the worker
+            # having restarted underneath us.
+            evicted = self._bump_on_link_loss(worker)
             self._emit(worker, tool, snapshot, declared, effective,
                        int((time.monotonic() - start) * 1000),
-                       "error", gate_override, exc.__class__.__name__,
+                       "error", gate_override,
+                       exc.__class__.__name__
+                       + (" (approvals evicted: link loss on a networked "
+                          "worker may mean a restarted process)" if evicted else ""),
                        tier_source)
             return _ErrorResult(f"{worker}.{tool} call failed: {exc}")
         latency = int((time.monotonic() - start) * 1000)
@@ -468,5 +523,5 @@ class RiskAwareToolPool:
             declared_tier=declared, effective_tier=effective,
             override_reason=override_reason, detail=detail, outcome=outcome,
             latency_ms=latency_ms, session_guid="pending",
-            worker_contract_version=1, tier_source=tier_source,
+            worker_contract_version=WORKER_CONTRACT_VERSION, tier_source=tier_source,
         ))
