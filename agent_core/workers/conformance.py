@@ -11,9 +11,26 @@ message.
 """
 from __future__ import annotations
 
+import os
+
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from agent_core.workers.client_pool import describe_failure
 from agent_core.workers.risk import RISK_TIER_META_KEY
+
+CONFORMANCE_TIMEOUT = float(os.environ.get("AGENT_CORE_CONFORMANCE_TIMEOUT", "30"))
+"""Bound on each conformance step, in seconds.
+
+This exists so a wedged server FAILS instead of hanging a suite forever. It is
+not a performance assertion, and it should not be read as one: the previous
+value was 2.0s, which on a developer box has a ~400x margin (a local
+initialize measures ~0.005s) but is a live failure risk on a shared CI runner
+that is doing other work. A bound tight enough to double as a benchmark will
+eventually fail for reasons that have nothing to do with conformance.
+
+Overridable so a genuinely slow target (a worker on a Pi across a tailnet)
+can be checked without editing the library.
+"""
 from agent_core.workers.types import (
     WORKER_CONTRACT_VERSION,
 )
@@ -136,28 +153,49 @@ async def assert_streamable_http_conformance(endpoint: str) -> None:
     exc_to_raise: AssertionError | None = None
     try:
         try:
-            await asyncio.wait_for(client.connect(), timeout=2.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            await asyncio.wait_for(client.connect(), timeout=CONFORMANCE_TIMEOUT)
+        except asyncio.TimeoutError:
             exc_to_raise = AssertionError(
-                f"streamable_http_conformance: connect timed out for {endpoint!r}"
+                f"streamable_http_conformance: connect exceeded "
+                f"{CONFORMANCE_TIMEOUT}s for {endpoint!r}"
+            )
+        except asyncio.CancelledError as exc:
+            # NOT a timeout, and saying so cost real debugging time: an MCP
+            # transport whose background task dies cancels its caller, so a
+            # server-side failure arrives here as a bare CancelledError.
+            exc_to_raise = AssertionError(
+                f"streamable_http_conformance: connect was cancelled for "
+                f"{endpoint!r} (the transport's task group failed, which "
+                f"usually means the server errored): {describe_failure(exc)}"
             )
         except Exception as exc:
             exc_to_raise = AssertionError(
-                f"streamable_http_conformance: connect failed for {endpoint!r}: {exc}"
+                f"streamable_http_conformance: connect failed for {endpoint!r}: "
+                f"{describe_failure(exc)}"
             )
 
         if exc_to_raise is not None:
             return  # Will raise in finally after cleanup
 
         try:
-            await asyncio.wait_for(client.initialize(), timeout=2.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            await asyncio.wait_for(client.initialize(), timeout=CONFORMANCE_TIMEOUT)
+        except asyncio.TimeoutError:
             exc_to_raise = AssertionError(
-                f"streamable_http_conformance: initialize timed out"
+                f"streamable_http_conformance: initialize exceeded "
+                f"{CONFORMANCE_TIMEOUT}s for {endpoint!r}. The server accepted "
+                f"the connection but never completed the response; check the "
+                f"server's own log for a handler that returned early."
+            )
+        except asyncio.CancelledError as exc:
+            exc_to_raise = AssertionError(
+                f"streamable_http_conformance: initialize was cancelled for "
+                f"{endpoint!r} (the transport's task group failed, which "
+                f"usually means the server errored): {describe_failure(exc)}"
             )
         except Exception as exc:
             exc_to_raise = AssertionError(
-                f"streamable_http_conformance: initialize failed: {exc}"
+                f"streamable_http_conformance: initialize failed for "
+                f"{endpoint!r}: {describe_failure(exc)}"
             )
 
         if exc_to_raise is not None:
@@ -214,7 +252,7 @@ async def assert_stdio_conformance(spec: "WorkerSpec") -> None:
     exc_to_raise: AssertionError | None = None
     try:
         try:
-            await asyncio.wait_for(client.connect(), timeout=2.0)
+            await asyncio.wait_for(client.connect(), timeout=CONFORMANCE_TIMEOUT)
         except asyncio.TimeoutError as exc:
             exc_to_raise = AssertionError(
                 f"stdio_conformance: connect timed out for {spec.name!r} "
@@ -235,7 +273,7 @@ async def assert_stdio_conformance(spec: "WorkerSpec") -> None:
             return  # Will raise in finally after cleanup
 
         try:
-            await asyncio.wait_for(client.initialize(), timeout=2.0)
+            await asyncio.wait_for(client.initialize(), timeout=CONFORMANCE_TIMEOUT)
         except asyncio.TimeoutError as exc:
             exc_to_raise = AssertionError(
                 f"stdio_conformance: initialize timed out for {spec.name!r}"

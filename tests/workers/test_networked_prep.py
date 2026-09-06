@@ -259,3 +259,48 @@ def test_target_names_the_endpoint_for_http_and_the_command_for_stdio():
     assert pool.target("net") == DEAD
     assert pool.target("local") == "/usr/bin/thing --serve"
     assert pool.target("unknown") == "unknown"
+
+
+# --- diagnosis: an error message that says nothing costs real time ---------
+
+def test_describe_failure_never_returns_an_empty_string():
+    """`worker stub discovery failed ()` is a real line from a real CI run.
+
+    asyncio.wait_for raises TimeoutError, whose str() is empty, and the log
+    interpolated it with %s. An operator staring at a red run learned nothing
+    about whether the worker was slow, unreachable, or erroring.
+    """
+    for exc in (asyncio.TimeoutError(), TimeoutError(), ValueError(),
+                RuntimeError(""), asyncio.CancelledError()):
+        described = describe_failure(exc)
+        assert described.strip(), f"{type(exc).__name__} produced {described!r}"
+        assert type(exc).__name__ in described
+
+
+def test_conformance_distinguishes_a_cancellation_from_a_timeout():
+    """They have different causes and different fixes.
+
+    An MCP transport whose background task dies cancels its caller, so a
+    SERVER-side failure arrives as a bare CancelledError. Reporting that as
+    'initialize timed out' points the reader at latency when the real problem
+    is a handler that returned without completing its response.
+    """
+    import inspect
+
+    from agent_core.workers import conformance
+
+    src = inspect.getsource(conformance.assert_streamable_http_conformance)
+    assert "except (asyncio.TimeoutError, asyncio.CancelledError)" not in src, (
+        "the two are collapsed again; a cancellation would be reported as a timeout")
+    assert "was cancelled" in src and "exceeded" in src
+
+
+def test_the_conformance_bound_is_not_a_benchmark():
+    """A bound tight enough to double as a performance assertion fails for
+    reasons unrelated to what it guards. Locally an initialize measures
+    ~0.005s; the old 2.0s bound still failed on a shared CI runner."""
+    from agent_core.workers.conformance import CONFORMANCE_TIMEOUT
+    from agent_core.workers.discovery import DISCOVERY_TIMEOUT
+
+    assert CONFORMANCE_TIMEOUT >= 10
+    assert DISCOVERY_TIMEOUT >= 10
