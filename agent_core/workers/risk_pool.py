@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 if TYPE_CHECKING:
     from agent_core.capture.layer import CaptureLayer
 
+from agent_core.workers.artifacts import (PRODUCES_ARTIFACT, PRODUCES_META_KEY,
+                                          PRODUCES_RESULT)
 from agent_core.workers.audit import AuditLog
 from agent_core.workers.client_pool import MCPClientPool
 from agent_core.workers.risk import RiskGate, RISK_TIER_META_KEY, resolve_declared_tier
@@ -125,6 +127,9 @@ class RiskAwareToolPool:
         # every non-advertising tool dropped to the new floor: exactly the
         # downgrade channel the high-water comment above claims to close.
         self._floor_highwater: dict[str, str] = {}
+        # Never evicted, for the same reason _tier_highwater is not: a reload
+        # must not become a channel for turning descriptor validation off.
+        self._produces_highwater: dict[tuple[str, str], str] = {}
         self._generations: dict[str, int] = {}
         # Registered LAST, and through _record_floor rather than a bare
         # inner.add_spec: seeding the floor ratchet eagerly is what keeps a
@@ -197,6 +202,16 @@ class RiskAwareToolPool:
 
     def generation(self, worker: str) -> int:
         return self._generations.get(worker, 0)
+
+    def produces(self, worker: str, tool: str) -> str:
+        """What this tool returns: "result" or "artifact".
+
+        Ratcheted and never evicted. An unrecognised or absent declaration
+        reads as "result" at dispatch -- an unrecognised value must not be a
+        licence to skip descriptor validation. Build-time conformance is what
+        rejects it outright.
+        """
+        return self._produces_highwater.get((worker, tool), PRODUCES_RESULT)
 
     def _bump(self, worker: str) -> None:
         self._generations[worker] = self.generation(worker) + 1
@@ -339,6 +354,10 @@ class RiskAwareToolPool:
                 hw = _max_tier(tier, self._tier_highwater.get((worker, name)))
                 if hw is not None:
                     self._tier_highwater[(worker, name)] = hw
+                produces = (meta.get(PRODUCES_META_KEY)
+                            if isinstance(meta, dict) else None)
+                if produces == PRODUCES_ARTIFACT:
+                    self._produces_highwater[(worker, name)] = PRODUCES_ARTIFACT
             except Exception:
                 # Same guarantee as the nameless-tool case above, extended to a
                 # malformed/hostile per-tool entry (bad meta shape, unhashable
