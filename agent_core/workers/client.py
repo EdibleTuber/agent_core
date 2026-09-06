@@ -208,6 +208,16 @@ class MCPClient:
         assert self._session is not None, "call connect() before list_tools()"
         return await self._session.list_tools()
 
+    async def ping(self):
+        """MCP ping — the cheapest request that proves the session is alive.
+
+        Cheaper than tools/list on purpose: a liveness probe runs on a timer
+        against every networked worker, and one that re-serialises frida's 19
+        tool schemas every interval would be a poll the operator pays for.
+        """
+        assert self._session is not None, "call connect() before ping()"
+        return await self._session.send_ping()
+
     async def call_tool(self, name: str, arguments: dict | None = None):
         """Send the MCP tools/call request. Returns CallToolResult.
 

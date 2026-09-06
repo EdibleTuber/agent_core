@@ -72,6 +72,21 @@ def _artifact_args(spec, server_info: dict | None = None) -> dict:
     return args
 
 
+DEFAULT_LIVENESS_INTERVAL = 30.0
+"""Seconds between liveness probes of networked workers.
+
+Deliberately not aggressive. The probe exists so a sleeping laptop stops
+being reported as healthy, not to detect a drop the instant it happens --
+the dispatch path already fails closed on link loss. Thirty seconds is
+frequent enough that an operator glancing at /worker list sees the truth,
+and rare enough to be invisible on a tailnet.
+"""
+
+DEFAULT_PROBE_TIMEOUT = 5.0
+"""Bound on one probe. A probe that can hang is worse than no probe: it
+would wedge the loop that exists to notice hangs."""
+
+
 ErrorKind = Literal[
     "unknown_worker", "spawn_failed", "connect_timeout", "protocol_mismatch",
     "tool_collision", "requires_unmet", "list_tools_failed", "disconnect_timeout",
@@ -110,12 +125,30 @@ class WorkerStatus:
     capability_tags: list[str]
     autoload: bool
     last_error: str | None = None
+    endpoint: str | None = None
+    """Which machine this worker is on. With three hosts in play, a healthy
+    networked worker was otherwise indistinguishable from any other in
+    /worker list -- you had to go read workers.yaml to find out."""
+    reachable: bool | None = None
+    """Liveness, for networked workers only.
+
+    None means "not applicable or not yet probed": stdio workers are not
+    probed, because the daemon owns the child process and a dead one is not
+    silent. True/False is a real observation from the last probe.
+
+    `loaded` and `reachable` answer different questions and both matter.
+    `loaded` means the daemon registered this worker's tools; `reachable`
+    means the worker was there a moment ago. Before this, a sleeping laptop
+    left /worker list reporting `loaded` with a stale tool count forever.
+    """
 
 
 class WorkerManager:
     def __init__(self, registry: WorkerRegistry, tool_pool, executor,
                  *, connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-                 disconnect_timeout: float = DEFAULT_DISCONNECT_TIMEOUT) -> None:
+                 disconnect_timeout: float = DEFAULT_DISCONNECT_TIMEOUT,
+                 liveness_interval: float = DEFAULT_LIVENESS_INTERVAL,
+                 probe_timeout: float = DEFAULT_PROBE_TIMEOUT) -> None:
         if not callable(getattr(tool_pool, "emit_lifecycle", None)):
             # Every other method this class calls on `tool_pool` -- add_spec,
             # remove_spec, connect, disconnect, list_tools -- exists
@@ -142,6 +175,106 @@ class WorkerManager:
         # unload's remove_worker can land after a load's add_all, leaving a
         # connected worker whose tools are invisible.
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._liveness_interval = liveness_interval
+        self._probe_timeout = probe_timeout
+        self._reachable: dict[str, bool] = {}
+        self._liveness_task: asyncio.Task | None = None
+
+    # --- liveness ---------------------------------------------------------
+    def _probes(self, name: str) -> bool:
+        """Whether this worker gets probed at all.
+
+        stdio does not: the daemon spawned the child and holds its pipe, so a
+        dead one is not silent -- the next dispatch fails immediately and the
+        pipe closes. There is nothing a timer would learn that the process
+        model does not already tell us, and probing would just spend a request
+        per worker per interval to confirm what the kernel guarantees.
+        """
+        try:
+            spec = self._registry.get(name)
+        except WorkerNotFoundError:
+            return False
+        return spec.transport != "stdio" and self.is_loaded(name)
+
+    async def probe(self, name: str) -> bool | None:
+        """One liveness probe. Returns True/False, or None if not applicable.
+
+        Uses MCP `ping` rather than `tools/list`: it carries no payload and
+        invokes nothing, so probing frida every interval does not re-serialise
+        19 tool schemas each time.
+
+        A failed probe records the reason in `last_error` -- the same field
+        /worker list already prints -- so the operator learns WHICH machine
+        stopped answering, not merely that something did.
+        """
+        if not self._probes(name):
+            return None
+        try:
+            await asyncio.wait_for(self._pool.ping(name), self._probe_timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._reachable[name] = False
+            self._errors[name] = (
+                f"unreachable at {self._target(name)}: {describe_failure(exc)}")
+            # Same signal as a dropped dispatch, so the same consequence. If
+            # the probe path did not evict, the two would disagree: a link
+            # that dropped between calls would be noticed by the timer and
+            # still leave a scope: session approval standing for a process
+            # that may have restarted.
+            evict = getattr(self._pool, "_bump_on_link_loss", None)
+            if callable(evict):
+                with contextlib.suppress(Exception):
+                    evict(name)
+            logger.warning("worker %s failed its liveness probe: %s",
+                           name, self._errors[name])
+            return False
+        self._reachable[name] = True
+        # Clear only a probe-authored error. A load-time failure the operator
+        # has not acted on is not "fixed" by one good ping.
+        if (self._errors.get(name) or "").startswith("unreachable at "):
+            self._errors.pop(name, None)
+        return True
+
+    async def probe_all(self) -> dict[str, bool]:
+        """Probe every worker that qualifies. Never raises for one bad worker:
+        the point is a whole-fleet picture."""
+        out: dict[str, bool] = {}
+        for spec in list(self._registry.all()):
+            result = await self.probe(spec.name)
+            if result is not None:
+                out[spec.name] = result
+        return out
+
+    def start_liveness(self) -> None:
+        """Begin probing in the background. Idempotent."""
+        if self._liveness_interval <= 0:
+            return
+        if self._liveness_task is not None and not self._liveness_task.done():
+            return
+        self._liveness_task = asyncio.create_task(
+            self._liveness_loop(), name="worker-liveness")
+
+    async def stop_liveness(self) -> None:
+        task, self._liveness_task = self._liveness_task, None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _liveness_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._liveness_interval)
+            try:
+                await self.probe_all()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A probe loop that dies takes the operator's only liveness
+                # signal with it, silently. Log and keep going.
+                logger.warning("liveness sweep failed; continuing",
+                               exc_info=True)
 
     # --- queries ----------------------------------------------------------
     def is_loaded(self, name: str) -> bool:
@@ -159,6 +292,8 @@ class WorkerManager:
                 capability_tags=list(spec.capability_tags),
                 autoload=spec.autoload,
                 last_error=self._errors.get(spec.name),
+                endpoint=spec.endpoint,
+                reachable=self._reachable.get(spec.name),
             ))
         return out
 
@@ -311,6 +446,12 @@ class WorkerManager:
         names = [c.name for c in classes]
         self._loaded[name] = names
         self._errors.pop(name, None)
+        # A fresh connection is reachable by construction -- we just
+        # handshaked over it -- and a stale False from a previous life would
+        # make /worker list contradict itself.
+        self._reachable[name] = spec.transport != "stdio"
+        if spec.transport == "stdio":
+            self._reachable.pop(name, None)
         try:
             self._pool.emit_lifecycle(name, "worker_loaded",
                                       args={"action": action,
@@ -365,6 +506,8 @@ class WorkerManager:
         self._executor.remove_worker(name)
         self._pool.remove_spec(name)
         self._loaded.pop(name, None)
+        # Liveness describes a connection; it must not outlive one.
+        self._reachable.pop(name, None)
         # Recorded BEFORE the only await in this method: _fail is now also the
         # rollback for a cancelled load, and a second cancellation landing in
         # the disconnect below must still leave status()/unavailable_reason()
@@ -402,6 +545,8 @@ class WorkerManager:
         removed = self._executor.remove_worker(name)
         self._pool.remove_spec(name)          # bumps generation, evicts approvals
         self._loaded.pop(name, None)
+        # Liveness describes a connection; it must not outlive one.
+        self._reachable.pop(name, None)
         err = kind = None
         try:
             await asyncio.wait_for(self._pool.disconnect(name),

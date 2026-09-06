@@ -141,6 +141,19 @@ class RiskAwareToolPool:
         """Read through to the inner pool — one source of truth for specs."""
         return self._inner.spec(worker)
 
+    def target(self, worker: str) -> str:
+        """Read through to the inner pool -- what this worker points at.
+
+        WorkerManager asks the pool it was GIVEN, which is this wrapper, not
+        the inner client pool. Without this passthrough the lookup silently
+        fell back to the bare worker name, so every message built from it --
+        connect_timeout, unreachable, the liveness probe error -- named the
+        one thing the operator already knew and omitted the endpoint, which
+        with three machines in play is the entire diagnosis.
+        """
+        getter = getattr(self._inner, "target", None)
+        return getter(worker) if callable(getter) else worker
+
     def server_info(self, worker: str) -> dict | None:
         """Read through to the inner pool -- one source of truth for identity."""
         getter = getattr(self._inner, "server_info", None)
@@ -301,6 +314,11 @@ class RiskAwareToolPool:
         ))
 
     # --- ungated proxies -------------------------------------------------
+    async def ping(self, worker: str):
+        """Ungated: a ping carries no arguments and invokes no tool, so there
+        is nothing for the risk gate to evaluate. It is control-plane."""
+        return await self._inner.ping(worker)
+
     async def list_tools(self, worker: str):
         result = await self._inner.list_tools(worker)
         for tool in getattr(result, "tools", []) or []:
