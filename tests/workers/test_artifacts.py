@@ -89,7 +89,7 @@ def test_the_error_names_the_worker_and_tool():
 
 
 # Task 4: Slug validation tests
-from agent_core.workers.artifacts import validate_slug
+from agent_core.workers.artifacts import SLUG_RE, validate_slug
 
 
 @pytest.mark.parametrize("ok", ["router-b", "a", "proj_2", "a" * 64,
@@ -154,3 +154,22 @@ def test_a_real_host_passes(ok):
     out = validate_descriptor(dict(_GOOD, host=ok), worker="hardware",
                               tool="dump_firmware")
     assert out["host"] == ok
+
+
+# Task 8: the slug rule is stated on both sides
+def test_the_slug_rule_agrees_with_the_worker_kits():
+    """Same arrangement as the produces constant above, for the same reason.
+    The kit builds artifact paths from a slug the daemon validated; if the two
+    rules drift, a slug the daemon accepts is one the worker refuses, and the
+    operator sees a path error with no clue that the two disagree.
+
+    Flags are compared as well as the pattern text: identical pattern strings
+    compiled with different flags (re.IGNORECASE, re.ASCII, re.UNICODE) are
+    different rules, so `.pattern` equality alone would not pin agreement.
+    """
+    kit = pytest.importorskip(
+        "pare_worker_kit.artifacts",
+        reason="pare-worker-kit is not installed here; the worker-side half "
+               "of this check runs in that package's own suite")
+    assert kit.SLUG_RE.pattern == SLUG_RE.pattern
+    assert kit.SLUG_RE.flags == SLUG_RE.flags
