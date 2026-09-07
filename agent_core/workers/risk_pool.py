@@ -343,12 +343,20 @@ class RiskAwareToolPool:
                 # discovery of the worker's remaining tools.
                 continue
             try:
-                meta = getattr(tool, "meta", None) or {}
+                meta = getattr(tool, "meta", None)
                 # A non-dict meta container is recorded AS IS rather than
                 # normalized to None: resolve_declared_tier maps any non-str,
                 # non-None advertised value to "invalid_advertised", whereas
                 # None records as "floor" -- indistinguishable in the audit log
                 # from an honest non-advertiser.
+                #
+                # No `or {}` here, deliberately. It looks harmless and is not:
+                # it collapses every FALSY non-dict -- [], "", 0 -- into a dict,
+                # so `.get()` returns None and a malformed container is logged
+                # as an honest non-advertiser, which is the exact distinction
+                # the paragraph above exists to preserve. _max_tier tolerates
+                # unhashable values (its isinstance guard runs before the `in`),
+                # so nothing below needs meta to be a dict.
                 tier = meta.get(RISK_TIER_META_KEY) if isinstance(meta, dict) else meta
                 self._tool_tiers[(worker, name)] = tier
                 hw = _max_tier(tier, self._tier_highwater.get((worker, name)))

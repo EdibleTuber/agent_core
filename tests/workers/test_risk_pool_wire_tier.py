@@ -159,3 +159,54 @@ async def test_call_before_discovery_uses_floor():
     assert inner.calls == [("frida", "list_devices")]
     assert pool._audit.entries[-1].declared_tier == "low"
     assert pool._audit.entries[-1].tier_source == "floor"
+
+
+class _RawMetaTool:
+    """A tool whose `_meta` container is whatever the wire delivered, including
+    something that is not a dict at all."""
+    def __init__(self, name, meta):
+        self.name = name
+        self.meta = meta
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("falsy_meta", [[], "", 0])
+async def test_a_falsy_non_dict_meta_is_not_mistaken_for_an_honest_worker(falsy_meta):
+    """A non-dict `_meta` is a malformed/tampered container and must surface as
+    "invalid_advertised", never as "floor".
+
+    list_tools documents exactly this intent -- a non-dict meta is "recorded AS
+    IS rather than normalized to None", because None reads as an honest
+    non-advertiser in the audit log. `meta = getattr(...) or {}` silently broke
+    that promise for every FALSY non-dict: `[]`, `""` and `0` all collapsed to
+    `{}`, which is a dict, so `.get()` returned None and the tool was logged as
+    though it had simply declined to advertise. Truthy non-dicts ("nope", [1])
+    were unaffected, which is why the existing malformed-tier test -- whose bad
+    values live inside a dict -- never caught it.
+    """
+    spec = WorkerSpec(name="frida", transport="stdio", command="x", risk_default="low")
+    inner = _FakeInner([_RawMetaTool("garbled_container", falsy_meta)])
+    pool = _pool(inner, spec)
+    await pool.list_tools("frida")
+
+    await pool.call_tool("frida", "garbled_container", {})
+    entry = pool._audit.entries[-1]
+    assert entry.declared_tier == "low"        # still the floor, as designed
+    assert entry.tier_source == "invalid_advertised", (
+        f"meta={falsy_meta!r} was recorded as an honest non-advertiser"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_absent_meta_still_reads_as_an_honest_non_advertiser():
+    """The other half of the same distinction, pinned so a future fix to the
+    line above cannot achieve it by flagging everything as malformed."""
+    spec = WorkerSpec(name="frida", transport="stdio", command="x", risk_default="low")
+    inner = _FakeInner([_RawMetaTool("quiet", None), _RawMetaTool("empty", {})])
+    pool = _pool(inner, spec)
+    await pool.list_tools("frida")
+
+    for name in ("quiet", "empty"):
+        await pool.call_tool("frida", name, {})
+        assert pool._audit.entries[-1].tier_source == "floor", (
+            f"{name!r} advertises nothing and must not be flagged as malformed")
