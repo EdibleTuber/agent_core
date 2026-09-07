@@ -70,9 +70,20 @@ def _assert_valid_produces_meta(tool: Any) -> None:
     safe reading, so nothing at runtime would ever surface the typo -- a tool
     meaning to declare `artifact` and writing `ARTIFACT` would silently
     stream its file contents as a tool result.
+
+    Genuinely absent -- no `meta` attribute, `meta=None`, `meta={}`, or a
+    dict missing the key -- passes. A `_meta` that is present but not a dict
+    at all is malformed regardless of which key is being inspected, so it
+    fails closed here rather than being silently treated as absent.
     """
-    meta = getattr(tool, "meta", None) or {}
-    if not isinstance(meta, dict) or PRODUCES_META_KEY not in meta:
+    meta = getattr(tool, "meta", None)
+    if meta is None:
+        return
+    assert isinstance(meta, dict), (
+        f"tool {getattr(tool, 'name', tool)!r} has a non-dict _meta "
+        f"({meta!r}); cannot check its {PRODUCES_META_KEY!r} declaration"
+    )
+    if PRODUCES_META_KEY not in meta:
         return
     produces = meta[PRODUCES_META_KEY]
     assert produces in VALID_PRODUCES, (
