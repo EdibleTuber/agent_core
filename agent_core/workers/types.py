@@ -65,8 +65,9 @@ class WorkerSpec(BaseModel):
     pydantic's default extra="ignore" meant an older agent_core reading a
     newer workers.yaml quietly discarded keys it did not understand. That was
     a documented annoyance for `autoload`. It is not acceptable for
-    `artifact_root`, which is a security control: a dropped root would leave
-    descriptor containment silently unenforced with no error anywhere.
+    `artifact_root`, which is a security control: a dropped root would
+    silently remove the anchor that descriptor containment is to be checked
+    against, with no error anywhere.
     """
 
     name: str
@@ -112,9 +113,21 @@ class WorkerSpec(BaseModel):
     anchor has to be the file the worker cannot touch -- the same reasoning as
     the risk pins.
 
-    None means the worker may not produce artifacts at all: a
-    produces="artifact" dispatch against a worker with no root is REFUSED
-    rather than accepted unvalidated.
+    None means the worker may not produce artifacts at all.
+
+    DECLARED, NOT YET ENFORCED -- read this as an intention, not as current
+    behaviour. The only rule acting on this field today is the absolute-path
+    validator below, which runs at config load. Nothing else in agent_core
+    reads it: the artifact contract on this branch is the wire constant, the
+    descriptor validator and the worker-side path builder, and no dispatch
+    path consults any of them yet. The intended rule -- a produces="artifact"
+    dispatch against a worker whose root is None is REFUSED rather than
+    accepted unvalidated, and a descriptor whose path is not under the root
+    is refused too -- has to be implemented where the WorkerSpec is in hand,
+    in the dispatch path that routes on the produces declaration.
+    agent_core.workers.artifacts.validate_descriptor names the same gap from
+    the other side: it cannot check containment, because it is handed a
+    worker name rather than this object.
     """
 
     artifact_drive_id: str | None = None
@@ -122,6 +135,13 @@ class WorkerSpec(BaseModel):
 
     os.path.ismount() cannot tell one project's removable drive from another's,
     so writing a dump to the wrong stick would otherwise be silent.
+
+    DECLARED, NOT YET ENFORCED, like artifact_root above: nothing reads or
+    compares this value today. Note where the comparison has to live when it
+    is built -- the daemon cannot see the worker's filesystem, so whatever
+    reads `.bench-store-id` runs on the WORKER, next to artifact_path in
+    pare-worker-kit. agent_core's part is to carry the expected id across
+    with the dispatch.
     """
 
     @field_validator("artifact_root")

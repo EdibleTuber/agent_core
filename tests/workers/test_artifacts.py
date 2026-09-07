@@ -58,8 +58,17 @@ def test_a_non_dict_payload_is_rejected():
 
 @pytest.mark.parametrize("bad", ["", "xyz", "a" * 63, "A" * 64, "g" * 64])
 def test_a_malformed_sha256_is_rejected(bad):
-    """Content-addressing on retrieval is the only control that survives an
-    untrusted producer, so the hash has to be a hash."""
+    """The hash has to be a hash -- but be exact about what a good one buys.
+
+    It is integrity, not authenticity: it detects corruption in transit and a
+    truncated or mismatched read, and it gives the artifact a stable identity
+    for audit and dedup. It does NOT survive an untrusted producer, which is
+    what this docstring used to claim. The worker supplies both the bytes and
+    the digest, so a truncated dump carries a perfectly correct sha256 of the
+    truncated bytes and verifies successfully. pare_worker_kit's
+    artifact_path says the same thing at length; agent_core is what the
+    implementer of the retrieval path reads, so it must not say more.
+    """
     payload = dict(_GOOD, sha256=bad)
     with pytest.raises(DescriptorError, match="sha256"):
         validate_descriptor(payload, worker="hardware", tool="dump_firmware")
@@ -173,3 +182,95 @@ def test_the_slug_rule_agrees_with_the_worker_kits():
                "of this check runs in that package's own suite")
     assert kit.SLUG_RE.pattern == SLUG_RE.pattern
     assert kit.SLUG_RE.flags == SLUG_RE.flags
+
+
+# Fix round 2: `path` hardened to the same standard as `host`
+@pytest.mark.parametrize("bad", [
+    "/mnt/store/../../etc/shadow",   # `..` is resolved by the kernel, so no
+    "/mnt/s/../..",                  # amount of quoting at the call site
+    "/..",                           # stops it
+    "/mnt/s/-rf",                    # lands locally as a file named `-rf`
+    "/mnt/s/-oProxyCommand=sh",
+    "/mnt/s/-rf/",                   # a trailing slash does not hide the name
+    "/mnt/s/f\x00/../etc",           # NUL truncates the path in every C API
+    "/mnt/s/f\x00.bin",
+    "/mnt/s/two\nlines",             # breaks any line-oriented audit record
+    "/mnt/s/esc\x1b[2Kbin",          # rewrites what the operator SEES
+    "/mnt/s/bell\x07",
+    "/mnt/s/del\x7f",
+])
+def test_a_path_that_would_misbehave_in_the_retrieval_command_is_rejected(bad):
+    """`path` is the other half of `scp <host>:<path>`, and until this round
+    it had only isinstance+startswith('/') while `host` had a full grammar.
+
+    Every case here is one a CORRECT caller cannot fix: `..` belongs to the
+    kernel, a leading dash belongs to argument parsing, and a control
+    character is not a character the operator can see. Quoting fixes none of
+    them.
+    """
+    payload = dict(_GOOD, path=bad)
+    with pytest.raises(DescriptorError, match="path"):
+        validate_descriptor(payload, worker="hardware", tool="dump_firmware")
+
+
+@pytest.mark.parametrize("ok", [
+    "/mnt/bench-store/router-b/fw-0001.bin",
+    "/mnt/s/fw..bin",           # two dots in a NAME is not a `..` COMPONENT
+    "/mnt/s/..hidden",
+    "/mnt/s/v1.2.3/fw.bin",
+    "/mnt/s/dump-2026-09-06.bin",
+    "/mnt/s/a b.bin",           # a space is ordinary in a filename
+])
+def test_a_legitimate_path_still_passes(ok):
+    """The traversal check is COMPONENT-WISE, never a substring search.
+    Refusing every path containing the two characters `..` would refuse
+    ordinary filenames and buy nothing: `fw..bin` escapes nothing."""
+    out = validate_descriptor(dict(_GOOD, path=ok), worker="hardware",
+                              tool="dump_firmware")
+    assert out["path"] == ok
+
+
+@pytest.mark.parametrize("accepted", [
+    "/mnt/s/f;rm -rf /", "/mnt/s/$(id)", "/mnt/s/`id`", "/mnt/s/a|b",
+    "/mnt/s/a&b", "/mnt/s/*.bin",
+])
+def test_shell_metacharacters_are_deliberately_accepted(accepted):
+    """A DECISION, pinned so it is not reversed by reflex.
+
+    Refusing `;`, `$`, backtick and `|` would look like shell-safety and
+    could not deliver it: space, quote, backslash, `*`, `?`, `[` and `~` are
+    all ordinary in filenames and all enough to break an unquoted splice, so
+    the blocklist would leave the hole open while advertising that it was
+    shut -- which is worse than not claiming it, because it invites the
+    unquoted splice. These characters also occur in real filenames.
+
+    The property is bought completely at the CALL SITE instead: build the
+    retrieval command as an argv list, or shlex.quote it. Under either,
+    `$(id)` in a filename is inert; under neither does a blocklist save you.
+
+    If a future change reverses this, it should delete this test and replace
+    the reasoning -- not leave it passing by accident.
+    """
+    out = validate_descriptor(dict(_GOOD, path=accepted), worker="hardware",
+                              tool="dump_firmware")
+    assert out["path"] == accepted
+
+
+def test_containment_against_the_artifact_root_is_not_checked_here():
+    """The named gap, pinned as behaviour rather than left as a comment.
+
+    `validate_descriptor(payload, *, worker, tool)` is handed a worker NAME,
+    not its WorkerSpec, so it has no artifact_root to compare against and
+    containment is not expressible in this signature. `/etc/shadow` is
+    well-formed by every rule this function knows.
+
+    That is not an oversight to be patched here by guessing a root. It
+    belongs to the caller that resolves the WorkerSpec -- the dispatch path
+    that routes on the produces declaration, which does not exist yet. This
+    test exists so that whoever adds a root to this signature is told to move
+    the paragraph in the docstring at the same time.
+    """
+    out = validate_descriptor(dict(_GOOD, path="/etc/shadow"),
+                              worker="hardware", tool="dump_firmware")
+    assert out["path"] == "/etc/shadow"
+    assert "artifact_root" in validate_descriptor.__doc__
