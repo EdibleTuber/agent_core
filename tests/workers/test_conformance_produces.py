@@ -39,3 +39,18 @@ def test_the_message_names_the_tool_and_the_bad_value():
         _assert_valid_produces_meta(_Tool("dump_firmware",
                                           {PRODUCES_META_KEY: "ARTIFACT"}))
     assert "dump_firmware" in str(e.value) and "ARTIFACT" in str(e.value)
+
+
+@pytest.mark.parametrize("bad_meta", [[], "nope", 42, True])
+def test_non_dict_meta_fails_closed(bad_meta):
+    """A `_meta` that is present but not a dict is malformed, not absent.
+
+    Mirrors _assert_valid_risk_tier_meta's behaviour on this input class:
+    that function raises for all four of these shapes because
+    `meta.get(...)` only runs when `isinstance(meta, dict)`, otherwise
+    `tier` stays None and fails its own membership assertion. This function
+    must fail the same way rather than silently treating a non-dict `_meta`
+    as equivalent to a missing one.
+    """
+    with pytest.raises(AssertionError, match="non-dict"):
+        _assert_valid_produces_meta(_Tool("t", bad_meta))
