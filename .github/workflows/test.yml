@@ -20,5 +20,39 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Install pare-worker-kit from source
+        # From git, NOT from a published release. These two packages state the
+        # wire constants independently and guard them against each other; a
+        # guard satisfied by a stale published version asserts agreement with a
+        # snapshot instead of with the code under test, and looks identical to
+        # a real pass. Verified locally: mutating this repo's
+        # RISK_TIER_META_KEY still left the kit's suite green when the kit was
+        # resolving a frozen v1.9.0 out of site-packages.
+        run: pip install "pare-worker-kit @ git+https://github.com/EdibleTuber/pare-worker-kit.git"
+
       - name: Run tests
         run: pytest -v
+
+      - name: Cross-package guards must run, not skip
+        # The guards use pytest.importorskip, so without the install above they
+        # SKIP and the suite is green having compared nothing. Green-by-skip is
+        # what this step exists to make impossible.
+        run: |
+          python -m pytest -k "agrees_with_the_worker_kit" --junitxml=guards.xml -q
+          python - <<'CHECK'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("guards.xml").getroot()
+          suite = root.find("testsuite")
+          suite = root if suite is None else suite
+          tests = int(suite.get("tests", 0))
+          skipped = int(suite.get("skipped", 0))
+          print(f"cross-package guards: {tests} collected, {skipped} skipped")
+          if tests == 0:
+              sys.exit("no cross-package guard tests were collected -- the -k "
+                       "filter no longer matches any test. Fix the filter; do "
+                       "not delete this step.")
+          if skipped:
+              sys.exit(f"{skipped} cross-package guard(s) SKIPPED. A skipped "
+                       "guard proves nothing: pare-worker-kit was not "
+                       "importable, so the wire constants were never compared.")
+          CHECK
