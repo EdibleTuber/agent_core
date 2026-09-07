@@ -51,13 +51,17 @@ def validate_descriptor(payload, *, worker: str, tool: str) -> dict:
     worker honest -- nothing on this side of the wire can.
 
     WHAT sha256 BUYS, EXACTLY. It is INTEGRITY, NOT AUTHENTICITY. It detects
-    corruption in transit and a truncated or mismatched read, and it gives
-    the artifact a stable identity for audit, dedup and later reference --
-    all of which are real and worth having. What it cannot do is attest that
-    the producer chose the RIGHT bytes: the worker supplies both the file and
-    the digest, so a worker that truncates a dump returns a perfectly correct
-    sha256 OF THE TRUNCATED BYTES, and the operator verifies it successfully
-    -- indistinguishable, by hash alone, from a complete one. Authenticity
+    corruption ACROSS THE TRANSFER, so a corrupted or half-finished `scp` is
+    caught rather than silently acted on, and it gives the artifact a stable
+    identity for audit, dedup and later reference -- both real and worth
+    having. What it cannot do is attest that the producer chose the RIGHT
+    bytes: the worker supplies both the file and the digest, so a worker that
+    truncates a dump AT PRODUCTION returns a perfectly correct sha256 OF THE
+    TRUNCATED BYTES, and the operator verifies it successfully --
+    indistinguishable, by hash alone, from a complete one. (The two cases are
+    kept in different words on purpose: the transfer one is a half-finished
+    `scp`, which the digest catches; the production one is a truncated dump,
+    which it cannot.) Authenticity
     needs a digest the producer did not supply: a vendor's published hash,
     one recorded before the worker could have been compromised, or a
     signature over a key the worker does not hold. The same paragraph is in
@@ -93,10 +97,23 @@ def validate_descriptor(payload, *, worker: str, tool: str) -> dict:
     worse than not claiming it, because it invites the unquoted splice it
     cannot protect. They also occur in real filenames (`$` in a Samba share
     path, `&` and `;` in names taken from vendor strings), so refusing them
-    is a usability cost paid for no gain. The property is bought COMPLETELY
-    at the call site instead: build the retrieval command as an argv list, or
-    shlex.quote it. So this function refuses what a correct caller still
-    cannot fix, and leaves what a correct caller fixes completely.
+    is a usability cost paid for no gain.
+
+    WHAT THE CALL SITE HAS TO DO INSTEAD, STATED PRECISELY. Use a transfer
+    whose argument is never re-parsed by a REMOTE shell: `scp` in its default
+    SFTP mode (that is, WITHOUT `-O`), or `sftp`, or `rsync -s`. Building an
+    argv list and calling shlex.quote are NOT sufficient on their own -- they
+    protect the operator's LOCAL shell only. Under the legacy SCP protocol,
+    scp(1)'s own CAVEATS section says the remote user's shell is executed to
+    perform glob(3) matching, so `scp -O bench-b:'/mnt/s/$(id)' .` survives
+    the operator's quoting intact and the substitution then runs on bench-b
+    -- a host the descriptor NAMED and the compromised worker need not
+    control. `ssh host "cat <path>"` and rsync without `-s` have the same
+    shape. OpenSSH >= 9.0 defaults to SFTP, so the default path is safe; this
+    is why the requirement is "use an SFTP-mode transfer", not "quote it".
+
+    So this function refuses what NO caller can fix, and leaves what the
+    right transfer mode fixes completely.
 
     NOT CHECKED HERE, AND IT IS A REAL GAP: containment of `path` under the
     worker's operator-declared `artifact_root`. This signature is handed a
@@ -108,6 +125,16 @@ def validate_descriptor(payload, *, worker: str, tool: str) -> dict:
     `spec.artifact_root`, and refuse any descriptor at all from a worker
     whose `artifact_root` is None. Nothing dispatches artifacts yet; that
     check has to land with the wiring, not be assumed to exist already.
+
+    THE SECOND GAP, SAME FAMILY: `host` is checked for SHAPE and never
+    against the worker it came from. `_HOST_RE` accepts any well-formed
+    hostname, so a compromised worker A can return `host: "bench-b"` and aim
+    the operator's retrieval at a machine of its choosing -- which is what
+    makes the remote-shell caveat above reachable at all. As with
+    containment, the daemon CAN check this and this function cannot: the
+    endpoint lives on the WorkerSpec, and this signature has only the worker
+    name. The dispatch path must reconcile a descriptor's `host` with the
+    spec it dispatched to.
     """
     where = f"{worker}.{tool}"
     if not isinstance(payload, dict):

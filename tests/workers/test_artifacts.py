@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 
 from agent_core.workers.artifacts import (PRODUCES_ARTIFACT, PRODUCES_META_KEY,
@@ -60,12 +62,13 @@ def test_a_non_dict_payload_is_rejected():
 def test_a_malformed_sha256_is_rejected(bad):
     """The hash has to be a hash -- but be exact about what a good one buys.
 
-    It is integrity, not authenticity: it detects corruption in transit and a
-    truncated or mismatched read, and it gives the artifact a stable identity
-    for audit and dedup. It does NOT survive an untrusted producer, which is
-    what this docstring used to claim. The worker supplies both the bytes and
-    the digest, so a truncated dump carries a perfectly correct sha256 of the
-    truncated bytes and verifies successfully. pare_worker_kit's
+    It is integrity, not authenticity: it detects corruption across the
+    transfer, so a corrupted or half-finished `scp` is caught rather than
+    silently acted on, and it gives the artifact a stable identity for audit
+    and dedup. It does NOT survive an untrusted producer, which is what this
+    docstring used to claim. The worker supplies both the bytes and the
+    digest, so a dump truncated AT PRODUCTION carries a perfectly correct
+    sha256 of the truncated bytes and verifies successfully. pare_worker_kit's
     artifact_path says the same thing at length; agent_core is what the
     implementer of the retrieval path reads, so it must not say more.
     """
@@ -216,7 +219,8 @@ def test_a_path_that_would_misbehave_in_the_retrieval_command_is_rejected(bad):
 @pytest.mark.parametrize("ok", [
     "/mnt/bench-store/router-b/fw-0001.bin",
     "/mnt/s/fw..bin",           # two dots in a NAME is not a `..` COMPONENT
-    "/mnt/s/..hidden",
+    "/mnt/s/..hidden",         # accepted HERE though the kit would not build
+                               # it -- see the test docstring
     "/mnt/s/v1.2.3/fw.bin",
     "/mnt/s/dump-2026-09-06.bin",
     "/mnt/s/a b.bin",           # a space is ordinary in a filename
@@ -224,7 +228,19 @@ def test_a_path_that_would_misbehave_in_the_retrieval_command_is_rejected(bad):
 def test_a_legitimate_path_still_passes(ok):
     """The traversal check is COMPONENT-WISE, never a substring search.
     Refusing every path containing the two characters `..` would refuse
-    ordinary filenames and buy nothing: `fw..bin` escapes nothing."""
+    ordinary filenames and buy nothing: `fw..bin` escapes nothing.
+
+    `..hidden` is the case where the two packages DELIBERATELY differ, and
+    neither said so until now. pare-worker-kit's `_NAME_RE` requires a
+    leading alphanumeric, so no kit-BUILT path can ever have that basename.
+    This function is looser on purpose: it validates descriptors from ANY
+    worker, including ones that never used the kit to construct the path, and
+    a leading dot is an ordinary filename on the filesystem the worker owns.
+    Tightening here to match the kit would reject a conformant non-kit worker
+    for a rule the wire contract never stated -- and would buy nothing, since
+    a leading dot escapes nothing and is not argument-injection range (that
+    is the leading DASH, refused above).
+    """
     out = validate_descriptor(dict(_GOOD, path=ok), worker="hardware",
                               tool="dump_firmware")
     assert out["path"] == ok
@@ -244,9 +260,14 @@ def test_shell_metacharacters_are_deliberately_accepted(accepted):
     shut -- which is worse than not claiming it, because it invites the
     unquoted splice. These characters also occur in real filenames.
 
-    The property is bought completely at the CALL SITE instead: build the
-    retrieval command as an argv list, or shlex.quote it. Under either,
-    `$(id)` in a filename is inert; under neither does a blocklist save you.
+    The property is bought at the CALL SITE instead, but by the TRANSFER
+    MODE and not by quoting: an SFTP-mode transfer (`scp` without `-O`,
+    `sftp`, `rsync -s`) never lets a remote shell re-parse the argument.
+    argv construction and shlex.quote protect the operator's LOCAL shell
+    only -- under legacy `scp -O`, scp(1)'s CAVEATS say the REMOTE user's
+    shell is executed for glob(3) matching, so `$(id)` in the path survives
+    correct local quoting and runs on the named host. A blocklist here would
+    not have saved that case either: it is the transfer mode that decides it.
 
     If a future change reverses this, it should delete this test and replace
     the reasoning -- not leave it passing by accident.
@@ -270,7 +291,13 @@ def test_containment_against_the_artifact_root_is_not_checked_here():
     test exists so that whoever adds a root to this signature is told to move
     the paragraph in the docstring at the same time.
     """
-    out = validate_descriptor(dict(_GOOD, path="/etc/shadow"),
-                              worker="hardware", tool="dump_firmware")
-    assert out["path"] == "/etc/shadow"
-    assert "artifact_root" in validate_descriptor.__doc__
+    for uncontained in ("/etc/shadow", "/some-other-root/router-b/fw.bin"):
+        out = validate_descriptor(dict(_GOOD, path=uncontained),
+                                  worker="hardware", tool="dump_firmware")
+        assert out["path"] == uncontained
+    # The STRUCTURAL half of the gap, asserted rather than a search for words
+    # in __doc__ -- which is None under `python -OO`, where the assertion
+    # would have been vacuous. This is also the more useful trigger: the day
+    # a root is threaded into this signature, this fails and says so.
+    assert not {"root", "artifact_root", "spec"} & set(
+        inspect.signature(validate_descriptor).parameters)
