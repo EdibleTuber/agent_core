@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.10.0] - 2026-09-08
+
+The daemon half of the artifact contract. A tool can now declare that it produces
+a **file** rather than a result, and the daemon routes on that declaration instead
+of on the model's choice of tool.
+
+### Added
+- `PRODUCES_META_KEY` (`agent_core/produces`) and `VALID_PRODUCES` — the second `_meta` wire key beside the risk tier. Stated as a literal here and independently in `pare-worker-kit`, with a guard test in each package asserting the other's matches when it is installed: the daemon and a worker are separately installed on different machines and never share a Python environment, so a shared constant is not available and a re-export would be a lie.
+- `agent_core.workers.artifacts` — `validate_descriptor(payload, *, worker, tool)` and `validate_slug`. The descriptor is self-reported by the worker, and lying about a **path** is not a data-integrity problem: the operator acts on it, so a descriptor naming `/etc/shadow` would make a worker a file-exfiltration primitive against its own host. `path` rejects control characters, any `..` component (component-wise, not substring), and a basename starting with `-`; `host` is validated because `scp <host>:<path>` puts *both* halves in the operator's shell.
+- `WorkerSpec.artifact_root` — operator-declared in `workers.yaml`, never read from the worker's environment. The trust anchor is the file the worker cannot touch.
+- A `produces` high-water mark on `RiskAwareToolPool`, never cleared by `_bump()`. Once a tool has been seen to produce artifacts it may not later be treated as producing results, for the same reason the tier ratchet exists: otherwise a reload disables descriptor validation.
+- Build-time conformance rejects an unrecognised `produces`. Dispatch falls back to the safe reading, so nothing at runtime would ever surface a typo — a tool meaning `artifact` and writing `ARTIFACT` would silently stream a file's contents back as a tool result.
+
+### Changed
+- **`WorkerSpec` sets `extra="forbid"`.** A key pydantic previously ignored is now an error. This is deliberate: `artifact_root` is a security control rather than an ergonomic default, and an older daemon silently dropping it would leave a `produces="artifact"` dispatch running with no containment. A `workers.yaml` carrying an unknown key — including a typo — now fails to load rather than loading without that key. Note the blast radius: one unknown key aborts the whole file, so no workers *and* no `risk_overrides`.
+
+### Fixed
+- `risk_pool.py` no longer collapses a falsy non-dict `_meta` into `{}`. `getattr(tool, "meta", None) or {}` turned `[]`, `""` and `0` into an empty dict, so a malformed container recorded as `floor` — indistinguishable in the audit log from an honest non-advertiser, which is the exact distinction the surrounding code says it exists to preserve. It now records as `invalid_advertised`. Truthy non-dicts were always handled; the existing test missed this because its bad values lived *inside* a dict, testing a malformed value rather than a malformed container.
+- Conformance fails closed on a non-dict `_meta` instead of treating it as absent.
+
+### Note on this file
+`1.9.0` was released without a CHANGELOG entry, so there is a gap between `1.8.0`
+and this release. Not backfilled here — reconstructing someone else's release
+notes from commit messages invites confident guesses. See `git log v1.8.0..v1.9.0`.
+
 ## [1.8.0] - 2026-09-05
 
 ### Added
