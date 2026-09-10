@@ -7,6 +7,8 @@ over MCP-Streamable-HTTP, an HTTP /jobs API, or an in-process stub.
 """
 from __future__ import annotations
 
+import os
+
 from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any, Literal
@@ -146,10 +148,47 @@ class WorkerSpec(BaseModel):
 
     @field_validator("artifact_root")
     @classmethod
-    def artifact_root_is_absolute(cls, v: str | None) -> str | None:
-        if v is not None and not v.startswith("/"):
+    def artifact_root_is_usable(cls, v: str | None) -> str | None:
+        """Apply the same LEXICAL rule the worker applies, at config load.
+
+        Containment is enforced on the worker (D7) and cannot be enforced here:
+        the artifact is on another machine, so resolving this path daemon-side
+        resolves it against the wrong namespace. This validator is not
+        enforcement -- it is the operator finding out now rather than at
+        hardware-run time with a dump half written.
+
+        The three checks mirror pare_worker_kit.artifacts, whose reasoning is
+        recorded there in full. A guard test runs one table of roots through
+        both implementations and asserts identical verdicts, so this cannot
+        drift into being a second, subtly different rule.
+        """
+        if v is None:
+            return None
+        if not v.startswith("/"):
             raise ValueError(
                 f"artifact_root must be an absolute path, got {v!r}")
+        if ".." in v.split("/"):
+            # Refused even though the root is trusted: containment is checked
+            # lexically and the kernel's resolution is not. For `/a/b/../c`
+            # where `b` is a symlink, normpath says `/a/c` and the kernel says
+            # somewhere else, so containment would be checked against a
+            # directory that is not the one written to.
+            raise ValueError(
+                f"artifact_root must be normalised, got {v!r}: a '..' component "
+                f"does not name the directory the operator declared")
+        base = os.path.normpath(v)
+        if os.path.commonpath([base, base]) != base:
+            # A root that is not a commonpath prefix of ITSELF cannot have
+            # containment checked against it. Today only paths beginning with
+            # exactly two slashes have that shape: POSIX leaves them
+            # implementation-defined, normpath preserves the `//` and
+            # commonpath collapses it. Refused rather than collapsed, because
+            # on a platform where `//host` names another filesystem,
+            # collapsing would silently relocate the artifact root.
+            raise ValueError(
+                f"ambiguous artifact_root {v!r}: a path beginning with exactly "
+                f"two slashes is implementation-defined in POSIX and is not a "
+                f"prefix of itself, so containment cannot be checked against it")
         return v
 
     @field_validator("name")
