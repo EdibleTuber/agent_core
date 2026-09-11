@@ -567,3 +567,160 @@ async def test_stream_does_not_retry_after_first_chunk(monkeypatch):
 
     assert attempts["n"] == 1
     assert out == ["hi"]
+
+
+# --- 409 model_not_loaded is recoverable, not terminal ----------------------
+#
+# The model manager fronting several llama.cpp backends refuses implicit model
+# swaps: a completion for a model loaded on no slot gets 409 with
+# {"error": {"type": "model_not_loaded", "message": "... use POST /swap"}}.
+# The remedy is named in the error. This client used to raise instead of taking
+# it, so the first turn of a session after a manager restart died -- observed in
+# PARE's log as `Chat error: Client error '409 Conflict'`.
+#
+# 503 ("loaded but slot not ready") was already retried with backoff. The
+# asymmetry was backwards: 409 has a deterministic fix, 503 is only hope.
+
+_NOT_LOADED = {"error": {"type": "model_not_loaded",
+                         "message": "model m not loaded on any slot; use POST /swap"}}
+_OK_COMPLETION = {"choices": [{"message": {"role": "assistant", "content": "ok"},
+                               "finish_reason": "stop"}]}
+
+
+def _client_with(handler):
+    client = InferenceClient(base_url="http://test", model="m")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return client
+
+
+@pytest.mark.asyncio
+async def test_a_model_not_loaded_409_triggers_a_swap_and_one_retry():
+    seen: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/swap":
+            return httpx.Response(200, json={"slot": "main", "model": "m", "status": "ok"})
+        if seen.count("POST /v1/chat/completions") == 1:
+            return httpx.Response(409, json=_NOT_LOADED)
+        return httpx.Response(200, json=_OK_COMPLETION)
+
+    result = await _client_with(handler).complete(
+        messages=[{"role": "user", "content": "hi"}])
+    assert result.type == "text" and result.content == "ok"
+    assert seen == ["POST /v1/chat/completions", "POST /swap",
+                    "POST /v1/chat/completions"], seen
+
+
+@pytest.mark.asyncio
+async def test_the_swap_asks_for_the_model_the_completion_wanted():
+    """And omits `target`: the client cannot know which slot a model belongs on,
+    so it lets the manager apply its own default rather than guessing and
+    evicting whatever is on main."""
+    bodies: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/swap":
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={"status": "ok"})
+        if not bodies:
+            return httpx.Response(409, json=_NOT_LOADED)
+        return httpx.Response(200, json=_OK_COMPLETION)
+
+    await _client_with(handler).complete(
+        messages=[{"role": "user", "content": "hi"}], model="some-other-model")
+    assert bodies == [{"model": "some-other-model"}], bodies
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_409_does_NOT_trigger_a_swap():
+    """Keyed on the error body, not the status code. A 409 from some other
+    backend for some other reason must not provoke a POST to an admin endpoint."""
+    seen: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(409, json={"error": {"type": "something_else",
+                                                   "message": "nope"}})
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _client_with(handler).complete(messages=[{"role": "user", "content": "hi"}])
+    assert "/swap" not in seen, seen
+
+
+@pytest.mark.asyncio
+async def test_a_409_with_an_unparseable_body_does_not_trigger_a_swap():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path != "/swap", "swapped on a body it could not read"
+        return httpx.Response(409, content=b"<html>gateway</html>")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _client_with(handler).complete(messages=[{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_it_swaps_at_most_once_and_then_gives_up():
+    """A swap that reports success while the completion still 409s must not
+    loop. One recovery attempt, then the caller hears about it."""
+    seen: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/swap":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(409, json=_NOT_LOADED)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _client_with(handler).complete(messages=[{"role": "user", "content": "hi"}])
+    assert seen.count("/swap") == 1, seen
+
+
+@pytest.mark.asyncio
+async def test_a_failed_swap_surfaces_the_original_409_not_the_swap_error():
+    """The caller needs to know the model was not loaded. A 404 from /swap on a
+    backend that has no such endpoint must not replace that diagnosis."""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/swap":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        return httpx.Response(409, json=_NOT_LOADED)
+
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        await _client_with(handler).complete(messages=[{"role": "user", "content": "hi"}])
+    assert e.value.response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_the_streaming_path_recovers_from_model_not_loaded_too():
+    """`complete` and `stream` have SEPARATE retry loops, both of which handled
+    only 503. Fixing one would have left the bug reachable through the other,
+    which is worse than not fixing it -- it looks fixed."""
+    seen: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/swap":
+            return httpx.Response(200, json={"status": "ok"})
+        if seen.count("/v1/chat/completions") == 1:
+            return httpx.Response(409, json=_NOT_LOADED)
+        body = ('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                'data: [DONE]\n\n')
+        return httpx.Response(200, content=body.encode(),
+                              headers={"Content-Type": "text/event-stream"})
+
+    chunks = [c async for c in _client_with(handler).stream(
+        messages=[{"role": "user", "content": "hi"}])]
+    assert any(getattr(c, "content", None) == "ok" or c == "ok" for c in chunks), chunks
+    assert seen == ["/v1/chat/completions", "/swap", "/v1/chat/completions"], seen
+
+
+@pytest.mark.asyncio
+async def test_the_streaming_path_does_not_swap_on_an_unrelated_409():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path != "/swap", "swapped on an unrelated 409"
+        return httpx.Response(409, json={"error": {"type": "other", "message": "no"}})
+
+    with pytest.raises(httpx.HTTPStatusError):
+        async for _ in _client_with(handler).stream(
+                messages=[{"role": "user", "content": "hi"}]):
+            pass

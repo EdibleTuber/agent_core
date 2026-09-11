@@ -29,6 +29,28 @@ _MAX_BACKOFF = 30.0
 # retried 600s read timeout would compound badly rather than recover.
 _RETRYABLE_CONNECTION_ERRORS = (httpx.RemoteProtocolError, httpx.NetworkError)
 
+# A model manager that fronts several backends may refuse to load a model
+# implicitly, answering a completion with 409 and naming the remedy:
+#   {"error": {"type": "model_not_loaded", "message": "... use POST /swap"}}
+# That is recoverable, unlike most 4xx, so it is handled -- see
+# _recover_from_model_not_loaded. Keyed on this string in the BODY rather than
+# on the 409 status, so an unrelated 409 from some other backend cannot provoke
+# a POST to an admin endpoint.
+_MODEL_NOT_LOADED = "model_not_loaded"
+
+
+def _is_model_not_loaded(body: bytes) -> bool:
+    """True only for the manager's typed model_not_loaded error. Never raises:
+    an unparseable body is not a licence to take an administrative action."""
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    return isinstance(error, dict) and error.get("type") == _MODEL_NOT_LOADED
+
 
 class BatchUnavailableError(RuntimeError):
     """Raised when a batch-mode InferenceClient cannot reach the batch
@@ -124,12 +146,24 @@ class InferenceClient:
         callers can distinguish batch-backend outages from other errors.
         """
         backoff = _INITIAL_BACKOFF
+        swap_attempted = False
         try:
             for attempt in range(_MAX_RETRIES):
                 yielded = False
                 try:
                     async with self._client.stream("POST", url, json=payload) as resp:
                         if resp.status_code != 503:
+                            if resp.status_code == 409 and not swap_attempted:
+                                # aread() first: a streaming response has no
+                                # .content until the body is pulled, and the
+                                # decision is keyed on the body, not the status.
+                                if _is_model_not_loaded(await resp.aread()):
+                                    swap_attempted = True
+                                    if await self._request_model_swap(
+                                            payload.get("model")):
+                                        continue
+                                    # Swap refused: fall through and raise the
+                                    # 409, which names the real problem.
                             resp.raise_for_status()
                             yielded = True
                             yield resp
@@ -164,6 +198,34 @@ class InferenceClient:
                 raise BatchUnavailableError(f"{type(exc).__name__}: {exc}") from exc
             raise
 
+    async def _request_model_swap(self, model: str | None) -> bool:
+        """Ask the manager to load `model`. Returns whether it reported success.
+
+        `target` is deliberately omitted: this client cannot know which slot a
+        model belongs on, so it lets the manager apply its own default rather
+        than guessing and evicting whatever is on the primary slot.
+
+        Never raises. A backend with no /swap endpoint answers 404, and the
+        caller then surfaces the ORIGINAL 409 -- the diagnosis the operator
+        needs is "the model was not loaded", not "/swap is missing".
+        """
+        if not model:
+            return False
+        try:
+            resp = await self._client.post(
+                f"{self.base_url}/swap", json={"model": model})
+        except Exception as exc:
+            logger.warning("model swap request for %s failed: %s: %s",
+                           model, type(exc).__name__, exc)
+            return False
+        if resp.status_code == 200:
+            logger.info("swapped inference backend to %s after a "
+                        "model_not_loaded 409", model)
+            return True
+        logger.warning("model swap for %s refused: %s %s",
+                       model, resp.status_code, resp.text[:200])
+        return False
+
     async def _post_with_retry(self, payload: dict) -> httpx.Response:
         """POST to /v1/chat/completions with exponential backoff on 503.
 
@@ -173,6 +235,7 @@ class InferenceClient:
         """
         url = f"{self.base_url}/v1/chat/completions"
         backoff = _INITIAL_BACKOFF
+        swap_attempted = False
         try:
             for attempt in range(_MAX_RETRIES):
                 try:
@@ -190,6 +253,15 @@ class InferenceClient:
                     backoff = min(backoff * 2, _MAX_BACKOFF)
                     continue
                 if resp.status_code != 503:
+                    if (resp.status_code == 409 and not swap_attempted
+                            and _is_model_not_loaded(resp.content)):
+                        # Recoverable: load the model, then retry once. No
+                        # sleep -- the swap already waited for the backend.
+                        swap_attempted = True
+                        if await self._request_model_swap(payload.get("model")):
+                            continue
+                        # Swap refused: fall through and raise the 409, which
+                        # is the error that actually describes the problem.
                     resp.raise_for_status()
                     return resp
                 retry_after = float(resp.headers.get("Retry-After", backoff))
