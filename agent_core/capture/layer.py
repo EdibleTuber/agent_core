@@ -42,8 +42,8 @@ class CaptureLayer:
             return self._store_provider()
         return self._store
 
-    def maybe_substitute(self, worker: str, tool: str, result: Any, *, substitute: bool,
-                         session_id: str | None = None) -> Any:
+    async def maybe_substitute(self, worker: str, tool: str, result: Any, *, substitute: bool,
+                               session_id: str | None = None) -> Any:
         # Store != Substitute. STORING is unconditional: every result — small or
         # large, single-row or many, success or error — is persisted so it stays
         # searchable/re-viewable (the flywheel needs recall, not just big rows).
@@ -59,7 +59,7 @@ class CaptureLayer:
             value = text  # opaque blob / error text -> degenerate row
         rows = infer_rows(value)
         body_bytes = len(text.encode("utf-8"))
-        ref = store.write(CaptureRecord(
+        ref = await store.write(CaptureRecord(
             worker=worker, tool=tool, session_id=session_id, launch_ts=self._launch_ts,
             summary=f"{tool}: {len(rows)} row(s)", body=text,
             rows=len(rows), addrs=normalize_addrs(text),
