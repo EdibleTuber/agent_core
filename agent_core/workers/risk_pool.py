@@ -432,8 +432,8 @@ class RiskAwareToolPool:
             # unconditionally and never stubs an error. (Approval blocks/denials
             # returned earlier and are intentionally not captured: no tool ran.)
             session_id = arguments.get("session_id") if isinstance(arguments, dict) else None
-            return self._capture.maybe_substitute(worker, tool, result, substitute=capture,
-                                                  session_id=session_id)
+            return await self._capture.maybe_substitute(worker, tool, result, substitute=capture,
+                                                        session_id=session_id)
         return result
 
     def _resolve_send(self, ctx):

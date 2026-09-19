@@ -60,7 +60,7 @@ class ReadCapture(Tool):
     async def run(self, args: dict, ctx: Any) -> str:
         store = ctx.agent.capture_store
         ref = args.get("ref") or ""
-        row = store.get(ref)
+        row = await store.get(ref)
         if row is None:
             return json.dumps({"expired": True,
                                "hint": "capture expired or unknown ref; use search_capture to find current data"})
