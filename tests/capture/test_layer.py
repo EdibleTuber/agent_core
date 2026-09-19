@@ -20,50 +20,50 @@ def _layer(budget=200):
     return CaptureLayer(CaptureStore.open_memory(), inline_budget=budget, launch_ts=1.0)
 
 
-def test_small_single_row_result_is_stored():
+async def test_small_single_row_result_is_stored():
     # Store != Substitute: a small single-row result stays inline (not stubbed)
     # but is still persisted for search/retrieval (was previously dropped).
     layer = _layer()
     r = _Result(json.dumps({"summary": "1 def rows", "rows": [{"class": "X", "method": "y"}]}))
-    out = layer.maybe_substitute("static", "find_symbol", r, substitute=True)
+    out = await layer.maybe_substitute("static", "find_symbol", r, substitute=True)
     assert out is r                              # small -> inline, not stubbed
     assert len(layer.store.recent()) == 1        # ...but stored
 
 
-def test_error_result_is_stored_and_passed_through():
+async def test_error_result_is_stored_and_passed_through():
     # Errors are captured too, so a failed run is searchable/reviewable; still
     # never stubbed (returned verbatim so the model sees the failure).
     layer = _layer()
     r = _ErrResult(json.dumps({"summary": "boom", "error": True}))
-    out = layer.maybe_substitute("static", "decompile_method", r, substitute=True)
+    out = await layer.maybe_substitute("static", "decompile_method", r, substitute=True)
     assert out is r
     assert len(layer.store.recent()) == 1
 
 
-def test_small_result_passes_through_unsubstituted():
+async def test_small_result_passes_through_unsubstituted():
     layer = _layer()
     r = _Result(json.dumps([{"a": 1}]))
-    out = layer.maybe_substitute("frida", "t", r, substitute=True)
+    out = await layer.maybe_substitute("frida", "t", r, substitute=True)
     assert out is r  # under budget -> model sees it verbatim
     assert len(layer.store.recent()) == 1  # small arrays are still stored
 
 
-def test_oversized_result_is_substituted_with_bounded_stub():
+async def test_oversized_result_is_substituted_with_bounded_stub():
     layer = _layer(budget=50)
     big = json.dumps([{"hex": "ab" * 500}])
-    out = layer.maybe_substitute("frida", "read_memory", _Result(big), substitute=True)
+    out = await layer.maybe_substitute("frida", "read_memory", _Result(big), substitute=True)
     text = stringify_result(out)
     assert len(text.encode("utf-8")) <= 512
     doc = json.loads(text)
     ref = doc["captured"]["ref"]
     # Full body retrievable from the store the layer wrote to.
-    assert json.loads(layer.store.get(ref)["body"])[0]["hex"] == "ab" * 500
+    assert json.loads((await layer.store.get(ref))["body"])[0]["hex"] == "ab" * 500
 
 
-def test_operator_path_stores_but_never_substitutes():
+async def test_operator_path_stores_but_never_substitutes():
     layer = _layer(budget=10)
     big = json.dumps([{"hex": "ab" * 500}])
     r = _Result(big)
-    out = layer.maybe_substitute("frida", "enumerate_processes", r, substitute=False)
+    out = await layer.maybe_substitute("frida", "enumerate_processes", r, substitute=False)
     assert out is r                     # operator sees the real payload
     assert len(layer.store.recent()) == 1  # ...but it was still stored
