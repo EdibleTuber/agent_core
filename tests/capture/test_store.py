@@ -10,19 +10,19 @@ def _rec(**kw):
     return CaptureRecord(**base)
 
 
-def test_write_returns_ref_and_get_roundtrips():
+async def test_write_returns_ref_and_get_roundtrips():
     store = CaptureStore.open_memory()
-    ref = store.write(_rec())
+    ref = await store.write(_rec())
     assert isinstance(ref, str) and len(ref) >= 6
-    row = store.get(ref)
+    row = await store.get(ref)
     assert row["worker"] == "frida"
     assert json.loads(row["body"]) == [{"name": "libc"}]
     assert row["rows"] == 1
     store.close()
 
 
-def test_refs_are_unique():
+async def test_refs_are_unique():
     store = CaptureStore.open_memory()
-    refs = {store.write(_rec()) for _ in range(50)}
+    refs = {await store.write(_rec()) for _ in range(50)}
     assert len(refs) == 50
     store.close()
