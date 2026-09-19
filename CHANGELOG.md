@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.11.0] - 2026-09-19
+
+`CaptureLayer.maybe_substitute` and `CaptureStore.write`/`get` become async. The
+actual sqlite write moves off the event loop onto a per-store dedicated writer
+thread with its own connection (sqlite is thread-affine). A synchronous
+sqlite write on the daemon loop stalled every coroutine on it for the
+write's duration — measured 0.401 s late against a 0.4 s write in the
+consumer (PARE Task 3) on the equivalent pane-activity path; the tool-capture
+path this fix addresses is hit on every tool result during a chat turn.
+
+### Changed
+- **`CaptureStore.write(record) -> str` is now `async def`.** Ref generation
+  (`secrets.token_hex(8)`) stays on the caller's thread; the sqlite INSERT +
+  FTS + blob-spill + commit body runs on the store's dedicated writer thread.
+  `write` returns the ref immediately after enqueueing; it does NOT await the
+  write's future. `open_memory()` skips the writer thread and runs the body
+  inline (a `:memory:` sqlite database exists only on its opener's connection).
+- **`CaptureStore.get(ref) -> dict | None` is now `async def`.** If a write for
+  `ref` is still in flight, `get` awaits its future before the SELECT — so a
+  read-after-write of a just-issued ref never sees a false `None` (which
+  `ReadCapture` renders to the model as "expired capture", a lie). A writer
+  exception is re-raised by `get`, distinguishable from `None`.
+- **`CaptureLayer.maybe_substitute(...)` is now `async def`.** Callers must
+  `await` it. One production caller: `RiskAwareToolPool.call_tool` at
+  `risk_pool.py:435`. `ReadCapture.run` at `tools.py:63` gains `await` for
+  the same reason (it's already `async`).
+
+### Migration for consumers
+- Every direct caller of `store.write` and `store.get` needs `await`. The only
+  in-ecosystem consumer that touches these is PARE; its migration is scoped in
+  `PARE/docs/superpowers/specs/2026-09-19-on-loop-capture-write-design.md`.
+  PAL does not use `CaptureLayer` or `CaptureStore` (verified by exhaustive
+  grep).
+- Sync consumers can wrap in `asyncio.run(store.get(ref))` only if they hold
+  no other event loop — most PARE consumers are already inside `async def`.
+
 ## [1.10.0] - 2026-09-08
 
 The daemon half of the artifact contract. A tool can now declare that it produces
