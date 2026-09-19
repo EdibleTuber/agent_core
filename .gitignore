@@ -12,3 +12,8 @@ dist/
 .tox/
 .mypy_cache/
 .ruff_cache/
+
+# Agent scratch — SDD ledgers/briefs/review packages, and harness worktrees.
+# Working state, never committed.
+.superpowers/
+.claude/worktrees/
