@@ -126,6 +126,7 @@ class CaptureStore:
                 try:
                     self._insert_record(conn, ref, record)
                 except Exception as exc:  # noqa: BLE001 - forwarded to the write's future
+                    logger.exception("capture store write failed for ref=%s", ref)
                     self._resolve_future(loop, future, exc)
                 else:
                     self._resolve_future(loop, future, None)

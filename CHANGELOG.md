@@ -35,6 +35,12 @@ path this fix addresses is hit on every tool result during a chat turn.
   grep).
 - Sync consumers can wrap in `asyncio.run(store.get(ref))` only if they hold
   no other event loop — most PARE consumers are already inside `async def`.
+- When a consumer needs to observe a write's success or failure (as PARE's
+  pane-activity path does), chain `ref = await store.write(record); await
+  store.get(ref)` — the second `await` waits on the pending-writes future
+  and re-raises any writer exception. A write whose failure needs only be
+  recorded in logs can rely on the writer's `logger.exception` (added in
+  this release).
 
 ## [1.10.0] - 2026-09-08
 

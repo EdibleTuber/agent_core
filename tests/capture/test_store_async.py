@@ -7,8 +7,12 @@ section 2 in the PARE repo). Test seam: CaptureStore.open(..., _pre_write_hook=.
 loop iteration, used here to pin the writer thread with a threading.Event.wait.
 """
 import asyncio
+import logging
+import re
 import threading
 import time
+
+import pytest
 
 from agent_core.capture.store import CaptureStore, CaptureRecord
 
@@ -91,6 +95,92 @@ async def test_write_returns_before_the_write_commits(tmp_path):
         )
     finally:
         store.close()
+
+
+async def test_writer_raises_then_get_raises(tmp_path, caplog):
+    """spec §4.3 / §2.6 row 1+4: a writer exception must surface to a
+    subsequent get(ref), and (F2) the failure must be logged regardless.
+
+    Note on the seam: _writer_loop (store.py:120-125) catches a raising
+    _pre_write_hook and only logs it -- it does NOT forward that exception
+    to the write's future (the `except Exception as exc:` block that does
+    is the *separate* one guarding `_insert_record`, a few lines below).
+    So a hook that merely raises would make the write succeed anyway and
+    this test would prove nothing. Instead, this hook is pinned exactly
+    like test_get_awaits_a_still_pending_write's (so get()'s `await future`
+    is provably parked on the *same* future object before the writer can
+    reach its `finally: pop`, which removes the race), and on release it
+    monkeypatches store._insert_record to raise a known exception -- making
+    the writer's insert path itself fail, deterministically.
+    """
+    release = threading.Event()
+
+    def _pin_then_sabotage():
+        release.wait(timeout=5.0)
+        store._insert_record = lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("writer sabotage")
+        )
+
+    store = CaptureStore.open(tmp_path / "cap.db", _pre_write_hook=_pin_then_sabotage)
+    caplog.set_level(logging.ERROR, logger="agent_core.capture.store")
+    try:
+        ref = await store.write(_rec())  # writer is pinned before it can insert
+
+        get_task = asyncio.create_task(store.get(ref))
+        # Give get_task a chance to retrieve and start awaiting the pending
+        # future -- once it holds the future object, the later `pop` from
+        # _pending_writes cannot make it miss the resolution.
+        await asyncio.sleep(0.05)
+        release.set()
+
+        with pytest.raises(RuntimeError, match="writer sabotage"):
+            await get_task
+
+        assert any(
+            rec.getMessage() == f"capture store write failed for ref={ref}"
+            for rec in caplog.records
+        ), "F2: a failed write must be logged even though this test awaits it"
+    finally:
+        release.set()
+        store.close()
+
+
+async def test_close_drains_with_bounded_timeout(tmp_path, caplog):
+    """spec §4.4: close() must not hang past its bound when a queued write
+    stalls, and must warn naming the queue depth rather than silently drop
+    the still-queued writes."""
+    calls = {"n": 0}
+
+    def _stall_first_write(_calls=calls):
+        _calls["n"] += 1
+        if _calls["n"] == 1:
+            time.sleep(6.0)  # longer than close()'s 5s join timeout
+
+    store = CaptureStore.open(tmp_path / "cap.db", _pre_write_hook=_stall_first_write)
+    caplog.set_level(logging.WARNING, logger="agent_core.capture.store")
+    try:
+        for _ in range(3):
+            await store.write(_rec())
+        # Let the writer thread dequeue and stall on the first item before
+        # close() races it.
+        await asyncio.sleep(0.05)
+
+        start = time.monotonic()
+        store.close()
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 6.0, (
+            f"close() took {elapsed:.3f}s -- expected it bounded near its 5s timeout, "
+            "not the 6s+ the stalled write would take if close() waited for it"
+        )
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            re.search(r"\d+ item\(s\) still queued", rec.getMessage()) for rec in warnings
+        ), "close() must warn, naming the queue depth, when it times out with items still queued"
+    finally:
+        pass  # store.close() already ran above; the writer thread is a
+        # daemon and will drain its remaining (already-enqueued) items in
+        # the background after this test returns.
 
 
 async def test_open_memory_never_starts_a_writer_thread(tmp_path):
