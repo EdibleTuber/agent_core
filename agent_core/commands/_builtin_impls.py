@@ -38,13 +38,21 @@ class Help(Command):
     requires = ("command_registry",)
 
     async def run(self, raw_args: str, ctx) -> AsyncIterator:
+        rows = list(ctx.agent.command_registry.metadata())
+        if not rows:
+            yield ResponseMessage(text="Available commands:")
+            return
+        # Aligned two-column table: the command column is padded to the
+        # longest entry plus a two-character gap so descriptions line up.
+        # Plain text only (no markup, no ANSI) -- it must stay safe for the
+        # CLI REPL as well as the daemon (pare-tui).
+        entries = [
+            f"/{name}" + (f" {args}" if args else "") for name, args, _ in rows
+        ]
+        width = max(len(entry) for entry in entries) + 2
         lines = ["Available commands:"]
-        for name, args, desc in ctx.agent.command_registry.metadata():
-            entry = f"  /{name}"
-            if args:
-                entry += f" {args}"
-            entry += f"  -  {desc}"
-            lines.append(entry)
+        for (name, args, desc), entry in zip(rows, entries):
+            lines.append("  " + entry.ljust(width) + desc)
         yield ResponseMessage(text="\n".join(lines))
 
 

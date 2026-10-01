@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.11.1] - 2026-10-01
+
+`/help` renders as an aligned two-column table: the command column
+(`/name` plus its arg spec) is padded to the longest entry plus a
+two-character gap, so descriptions line up. Purely presentational — same
+commands, same metadata, plain text, no markup. Fixes the wall-of-text
+output in both the CLI REPL and the daemon (and therefore pare-tui).
+
+### Changed
+- **`Help.run`** — command column width computed from the longest entry
+  (long arg specs like `/scratch [clear | <text>]` size the column; no
+  fixed width). Empty registry still yields just the header.
+
 ## [1.11.0] - 2026-09-19
 
 `CaptureLayer.maybe_substitute` and `CaptureStore.write`/`get` become async. The

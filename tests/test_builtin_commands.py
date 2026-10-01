@@ -90,6 +90,36 @@ async def test_help_formats_args():
     assert "Show status" in body
 
 
+async def test_help_is_an_aligned_two_column_table():
+    """2026-10-01: the flat "  /name args  -  desc" lines were a wall of
+    text in the CLI and the daemon; the command column is now padded to
+    the longest entry + 2 so descriptions line up. Plain text only."""
+    cr = MagicMock()
+    cr.metadata.return_value = [
+        ("hello", "[<name>]", "Say hi to the agent"),
+        ("quit", "", "Exit"),
+        ("scratch", "[clear | <text>]", "Read or manage the scratchpad"),
+    ]
+    agent = MagicMock(command_registry=cr)
+    body = _body(await _collect(Help().run("", _ctx(agent))))
+    lines = body.splitlines()
+    assert lines[0] == "Available commands:"
+    # Column width = longest entry ("/scratch [clear | <text>]", 25) + 2.
+    assert lines[1] == "  " + "/hello [<name>]".ljust(27) + "Say hi to the agent"
+    assert lines[2] == "  " + "/quit".ljust(27) + "Exit"
+    assert lines[3] == (
+        "  " + "/scratch [clear | <text>]".ljust(27) + "Read or manage the scratchpad"
+    )
+
+
+async def test_help_with_no_commands_shows_only_the_header():
+    cr = MagicMock()
+    cr.metadata.return_value = []
+    agent = MagicMock(command_registry=cr)
+    body = _body(await _collect(Help().run("", _ctx(agent))))
+    assert body == "Available commands:"
+
+
 # ---------------------------------------------------------------------------
 # /clear
 # ---------------------------------------------------------------------------
