@@ -75,7 +75,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 reasons in validate_descriptor's docstring -- none of them are fixable by a
 caller that quotes correctly."""
 
-_HASHED_AT_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z\Z")
+_HASHED_AT_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z\Z")
 """RFC 3339 UTC in the strict `Z` form, optional fractional seconds.
 
 "Required" without a format is not a contract, so the wire states one. The

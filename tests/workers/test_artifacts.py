@@ -442,6 +442,8 @@ def test_a_drive_id_that_is_not_the_sentinel_grammar_is_refused(bad):
     "2026-09-06T12:34:56+02:00",   # a non-UTC offset
     "2026-09-06T12:34:56",         # no zone
     "2026-09-06T12:34:56z",        # lowercase z: one spelling, pinned
+    "٢٠٢٦-٠٩-٠٦T١٢:٣٤:٥٦Z",     # Arabic-Indic digits: RFC 3339 DIGIT is
+                                    # %x30-39, and Python's \d matches more
     None,
 ])
 def test_a_hashed_at_that_is_not_rfc3339_utc_is_refused(bad):
