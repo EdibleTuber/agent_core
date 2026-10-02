@@ -117,19 +117,16 @@ class WorkerSpec(BaseModel):
 
     None means the worker may not produce artifacts at all.
 
-    DECLARED, NOT YET ENFORCED -- read this as an intention, not as current
-    behaviour. The only rule acting on this field today is the absolute-path
-    validator below, which runs at config load. Nothing else in agent_core
-    reads it: the artifact contract on this branch is the wire constant, the
-    descriptor validator and the worker-side path builder, and no dispatch
-    path consults any of them yet. The intended rule -- a produces="artifact"
-    dispatch against a worker whose root is None is REFUSED rather than
-    accepted unvalidated, and a descriptor whose path is not under the root
-    is refused too -- has to be implemented where the WorkerSpec is in hand,
-    in the dispatch path that routes on the produces declaration.
-    agent_core.workers.artifacts.validate_descriptor names the same gap from
-    the other side: it cannot check containment, because it is handed a
-    worker name rather than this object.
+    DECLARED, ENFORCED AT TWO OF THREE LAYERS -- read this as an intention,
+    not as current behaviour. The absolute-path validator below runs at
+    config load, and agent_core.workers.artifacts.validate_descriptor now
+    takes this object (as `spec`) and refuses a descriptor whose path is not
+    under `{artifact_root}/{slug}` -- lexically, D7's daemon-side shadow of
+    the worker's real check. What is still missing is the dispatch path that
+    routes on the produces declaration and calls the validator with this
+    spec: until it lands, a produces="artifact" dispatch against a worker
+    whose root is None is refused nowhere, and the validator's own no-root
+    refusal is defence in depth rather than the operator's experience.
     """
 
     artifact_drive_id: str | None = None
@@ -138,12 +135,14 @@ class WorkerSpec(BaseModel):
     os.path.ismount() cannot tell one project's removable drive from another's,
     so writing a dump to the wrong stick would otherwise be silent.
 
-    DECLARED, NOT YET ENFORCED, like artifact_root above: nothing reads or
-    compares this value today. Note where the comparison has to live when it
-    is built -- the daemon cannot see the worker's filesystem, so whatever
-    reads `.bench-store-id` runs on the WORKER, next to artifact_path in
-    pare-worker-kit. agent_core's part is to carry the expected id across
-    with the dispatch.
+    HALF ENFORCED, like artifact_root above:
+    agent_core.workers.artifacts.validate_descriptor now COMPARES a
+    descriptor's drive_id against this value and refuses a mismatch -- and
+    refuses outright when this field is None. What is still missing is the
+    dispatch path that carries this value to the validator. Note where the
+    OTHER half has to live when it is built -- the daemon cannot see the
+    worker's filesystem, so whatever reads `.bench-store-id` runs on the
+    WORKER, next to artifact_path in pare-worker-kit.
     """
 
     @field_validator("artifact_root")

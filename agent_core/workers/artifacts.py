@@ -6,7 +6,12 @@ constant and validates what comes back.
 """
 from __future__ import annotations
 
+import os
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_core.workers.types import WorkerSpec
 
 PRODUCES_META_KEY = "agent_core/produces"
 """Stated here and in pare-worker-kit, with a guard test on each side. See
@@ -70,14 +75,49 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 reasons in validate_descriptor's docstring -- none of them are fixable by a
 caller that quotes correctly."""
 
-_REQUIRED = ("host", "path", "size", "sha256")
+_HASHED_AT_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z\Z")
+"""RFC 3339 UTC in the strict `Z` form, optional fractional seconds.
+
+"Required" without a format is not a contract, so the wire states one. The
+check is FORMAT, not calendar: whether the timestamp is true is a custody
+record the daemon cannot verify (the worker's clock is what it is), and this
+function checks shape, not truthfulness, like every other field. A non-UTC
+offset is refused because the field IS UTC, not "a time with a zone"; the
+uppercase `Z` is pinned because the producer (open_artifact) emits that
+spelling and a second accepted spelling is comparison surface the operator's
+eye cannot audit.
+"""
+
+_MEDIA_TYPE_RE = re.compile(
+    r"\A[A-Za-z0-9!#$&^_.+-]{1,126}/[A-Za-z0-9!#$&^_.+-]{1,126}\Z")
+"""An IANA type/subtype, and nothing else.
+
+No parameters (`;q=`, `;charset=`): the field is the type/subtype, not a full
+media-type production. No wildcards (`*`): a descriptor names what the file
+IS, not a range of what it might be. The character class is the RFC 2045
+token set minus the characters no registered type uses, and the 126 cap is
+the RFC token length limit. Case-insensitive by RFC 2046, so
+`application/octet-stream` and `APPLICATION/OCTET-STREAM` both pass.
+"""
+
+_DRIVE_ID_RE = re.compile(
+    r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+"""Canonical lowercase UUID -- the grammar of the sentinel file
+(`{artifact_root}/.bench-store-id`) the value is read from.
+
+Lowercase and dashed, and only that: the sentinel is written that way, and a
+second accepted spelling is a second comparison the operator's eye cannot
+audit. drive_id also gets the explicit _CONTROL_RE check: the value is
+printed into the mismatch message an operator reads, and an escape sequence
+in it would rewrite what that message says.
+"""
 
 
 class DescriptorError(ValueError):
     """A tool declared `produces: artifact` and returned something else."""
 
 
-def validate_descriptor(payload, *, worker: str, tool: str) -> dict:
+def validate_descriptor(payload, *, spec: WorkerSpec, tool: str, slug: str) -> dict:
     """Check the SHAPE of an artifact descriptor. Not its truthfulness.
 
     Everything here is self-reported by the worker. This rejects a malformed
@@ -149,33 +189,47 @@ def validate_descriptor(payload, *, worker: str, tool: str) -> dict:
     So this function refuses what NO caller can fix, and leaves what the
     right transfer mode fixes completely.
 
-    NOT CHECKED HERE, AND IT IS A REAL GAP: containment of `path` under the
-    worker's operator-declared `artifact_root`. This signature is handed a
-    worker NAME, not its WorkerSpec, so there is no root to compare against
-    and containment is not expressible here -- `/etc/shadow` passes every
-    check in this function. THE CALLER THAT HOLDS THE ROOT MUST DO IT: the
-    dispatch path that routes on the produces declaration resolves the
-    WorkerSpec, and it must refuse a descriptor whose path is not under
-    `spec.artifact_root`, and refuse any descriptor at all from a worker
-    whose `artifact_root` is None. Nothing dispatches artifacts yet; that
-    check has to land with the wiring, not be assumed to exist already.
+    CONTAINMENT IS CHECKED HERE, AGAINST THE PROJECT DIRECTORY, NOT THE ROOT.
+    The slug arrives as a keyword because it is not in the payload: the
+    daemon validated it, injected it into the tool call as the reserved slug
+    argument, and hands it back here. The rule is `path` under
+    `{artifact_root}/{slug}`, decided by `commonpath` on normalised paths --
+    a LEXICAL check, D7's division of labour: the worker enforces the real
+    containment (it is the only side that can see symlinks and mount points),
+    and this is the daemon's shadow of the same rule, so a descriptor that
+    lies about its project is refused at the chokepoint rather than at
+    retrieval time. Against the root alone the check would bind the injected
+    slug to nothing: `/mnt/bench-store/other-proj/fw.bin` is well contained
+    by the root and is another project's dump.
 
-    THE SECOND GAP, SAME FAMILY: `host` is checked for SHAPE and never
-    against the worker it came from. `_HOST_RE` accepts any well-formed
-    hostname, so a compromised worker A can return `host: "bench-b"` and aim
-    the operator's retrieval at a machine of its choosing -- which is what
-    makes the remote-shell caveat above reachable at all. As with
-    containment, the daemon CAN check this and this function cannot: the
-    endpoint lives on the WorkerSpec, and this signature has only the worker
-    name. The dispatch path must reconcile a descriptor's `host` with the
-    spec it dispatched to.
+    A worker whose `artifact_root` is None refuses every descriptor, as does
+    one whose `artifact_drive_id` is None: the dispatch path (which lands
+    after this) refuses earlier, with the operator-facing message, and these
+    refusals keep the function safe to call standalone.
+
+    THE DRIVE ID IS COMPARED, NOT JUST FORM-CHECKED. `drive_id` must match
+    the sentinel's UUID grammar AND equal `spec.artifact_drive_id`; a
+    mismatch means the bytes went to a different drive than workers.yaml
+    names, and the error names both values so the operator can see which is
+    which.
+
+    THE REMAINING GAP: `host` is checked for SHAPE and never against the
+    worker it came from. `_HOST_RE` accepts any well-formed hostname, so a
+    compromised worker A can return `host: "bench-b"` and aim the operator's
+    retrieval at a machine of its choosing -- which is what makes the
+    remote-shell caveat above reachable at all. This function now RECEIVES
+    the WorkerSpec but still does not reconcile the host: the endpoint field
+    (`artifact_host`) is not on the spec yet, and lands with the dispatch
+    wiring. Until it does, host stays shape-only on purpose, and the
+    dispatch path must reconcile a descriptor's `host` with the spec it
+    dispatched to.
     """
-    where = f"{worker}.{tool}"
+    where = f"{spec.name}.{tool}"
     if not isinstance(payload, dict):
         raise DescriptorError(
             f"{where} declared produces=artifact but returned "
             f"{type(payload).__name__}, not a JSON object")
-    for field in _REQUIRED:
+    for field in ARTIFACT_DESCRIPTOR_FIELDS:
         if field not in payload:
             raise DescriptorError(f"{where}: descriptor is missing {field!r}")
 
@@ -211,6 +265,47 @@ def validate_descriptor(payload, *, worker: str, tool: str) -> dict:
             f"{where}: descriptor path names {name!r}, which begins with '-' "
             f"and is read as an option rather than a filename by the commands "
             f"an operator runs on it; got {path!r}")
+
+    if spec.artifact_root is None:
+        raise DescriptorError(
+            f"{where}: worker {spec.name!r} declares no artifact_root, so no "
+            f"artifact it returns can be contained; refused, not validated")
+    project = os.path.normpath(os.path.join(spec.artifact_root, slug))
+    if os.path.commonpath([os.path.normpath(path), project]) != project:
+        raise DescriptorError(
+            f"{where}: descriptor path {path!r} is not under {project!r}: "
+            f"containment is against the project directory "
+            f"({spec.artifact_root!r}/{slug!r}), not the root, so the "
+            f"injected slug binds the path to the project it names")
+
+    hashed_at = payload["hashed_at"]
+    if not isinstance(hashed_at, str) or not _HASHED_AT_RE.match(hashed_at):
+        raise DescriptorError(
+            f"{where}: descriptor hashed_at must be RFC 3339 UTC "
+            f"(e.g. 2026-09-06T12:34:56Z), got {hashed_at!r}")
+
+    media_type = payload["media_type"]
+    if not isinstance(media_type, str) or not _MEDIA_TYPE_RE.match(media_type):
+        raise DescriptorError(
+            f"{where}: descriptor media_type must be an IANA type/subtype, "
+            f"got {media_type!r}")
+
+    drive_id = payload["drive_id"]
+    if (not isinstance(drive_id, str) or _CONTROL_RE.search(drive_id)
+            or not _DRIVE_ID_RE.match(drive_id)):
+        raise DescriptorError(
+            f"{where}: descriptor drive_id must be the canonical lowercase "
+            f"UUID read from the sentinel file, got {drive_id!r}")
+    if spec.artifact_drive_id is None:
+        raise DescriptorError(
+            f"{where}: worker {spec.name!r} declares artifact_root without "
+            f"artifact_drive_id; a descriptor it returns cannot be checked "
+            f"against the drive it names, so it is refused")
+    if drive_id != spec.artifact_drive_id:
+        raise DescriptorError(
+            f"{where}: descriptor drive_id {drive_id!r} is not the declared "
+            f"{spec.artifact_drive_id!r}: the artifact was written to a "
+            f"different drive than workers.yaml names")
 
     host = payload["host"]
     if not isinstance(host, str) or not _HOST_RE.match(host):

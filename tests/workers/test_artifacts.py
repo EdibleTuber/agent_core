@@ -54,36 +54,58 @@ def test_it_agrees_with_the_worker_kit():
 
 # Task 3: Descriptor validation tests
 from agent_core.workers.artifacts import DescriptorError, validate_descriptor
+from agent_core.workers.types import WorkerSpec
+
+_DRIVE = "12345678-90ab-4cd0-8e12-34567890abcd"
+"""A made-up sentinel UUID for tests. Never the bench drive's id: that value
+is read from the drive, not typed from memory."""
 
 _GOOD = {
     "host": "pare-bench",
     "path": "/mnt/bench-store/router-b/fw-0001.bin",
     "size": 2147483648,
     "sha256": "a" * 64,
-    "hashed_at": 1757160000.0,
+    "hashed_at": "2026-09-06T12:34:56Z",
     "media_type": "application/octet-stream",
+    "drive_id": _DRIVE,
 }
 
 
+def _spec(root="/mnt/bench-store", drive_id=_DRIVE):
+    return WorkerSpec(name="hardware", transport="stdio", command="/bin/true",
+                      risk_default="high", artifact_root=root,
+                      artifact_drive_id=drive_id)
+
+
+def _v(payload, *, root="/mnt/bench-store", drive_id=_DRIVE, slug="router-b"):
+    """The one call shape for the rest of this file. The default spec makes
+    the _GOOD path contained (root /mnt/bench-store, slug router-b), so the
+    shape tests keep testing shape, and the containment tests opt out by
+    changing root, drive_id or slug."""
+    return validate_descriptor(payload, spec=_spec(root, drive_id),
+                               tool="dump_firmware", slug=slug)
+
+
 def test_a_well_formed_descriptor_passes_through():
-    out = validate_descriptor(dict(_GOOD), worker="hardware", tool="dump_firmware")
-    assert out["path"] == _GOOD["path"]
-    assert out["size"] == _GOOD["size"]
+    out = _v(dict(_GOOD))
+    assert out == dict(_GOOD)
 
 
-@pytest.mark.parametrize("missing", ["host", "path", "size", "sha256"])
+@pytest.mark.parametrize("missing", ARTIFACT_DESCRIPTOR_FIELDS)
 def test_a_missing_required_field_is_rejected(missing):
     """A tool that declares `artifact` and returns something else is a contract
-    violation, recorded as an error rather than silently treated as a result."""
+    violation, recorded as an error rather than silently treated as a result.
+    Parametrised over the constant, not a re-typed list: the field set IS the
+    constant, and a field landing in it must light this test up."""
     payload = dict(_GOOD)
     del payload[missing]
     with pytest.raises(DescriptorError, match=missing):
-        validate_descriptor(payload, worker="hardware", tool="dump_firmware")
+        _v(payload)
 
 
 def test_a_non_dict_payload_is_rejected():
     with pytest.raises(DescriptorError, match="not a JSON object"):
-        validate_descriptor(["nope"], worker="hardware", tool="dump_firmware")
+        _v(["nope"])
 
 
 @pytest.mark.parametrize("bad", ["", "xyz", "a" * 63, "A" * 64, "g" * 64])
@@ -102,14 +124,14 @@ def test_a_malformed_sha256_is_rejected(bad):
     """
     payload = dict(_GOOD, sha256=bad)
     with pytest.raises(DescriptorError, match="sha256"):
-        validate_descriptor(payload, worker="hardware", tool="dump_firmware")
+        _v(payload)
 
 
 @pytest.mark.parametrize("bad", [-1, "big", 1.5, None])
 def test_a_non_integer_size_is_rejected(bad):
     payload = dict(_GOOD, size=bad)
     with pytest.raises(DescriptorError, match="size"):
-        validate_descriptor(payload, worker="hardware", tool="dump_firmware")
+        _v(payload)
 
 
 def test_a_relative_path_is_rejected():
@@ -117,14 +139,14 @@ def test_a_relative_path_is_rejected():
     be compared against one."""
     payload = dict(_GOOD, path="fw-0001.bin")
     with pytest.raises(DescriptorError, match="absolute"):
-        validate_descriptor(payload, worker="hardware", tool="dump_firmware")
+        _v(payload)
 
 
 def test_the_error_names_the_worker_and_tool():
     """An operator reading an audit row needs to know which tool violated the
     contract, not merely that one did."""
     with pytest.raises(DescriptorError) as e:
-        validate_descriptor({}, worker="hardware", tool="dump_firmware")
+        _v({})
     assert "hardware" in str(e.value) and "dump_firmware" in str(e.value)
 
 
@@ -185,14 +207,13 @@ def test_a_host_that_is_not_a_hostname_is_rejected(bad):
     a part of that command as path is."""
     payload = dict(_GOOD, host=bad)
     with pytest.raises(DescriptorError, match="host"):
-        validate_descriptor(payload, worker="hardware", tool="dump_firmware")
+        _v(payload)
 
 
 @pytest.mark.parametrize("ok", ["pare-bench", "100.68.47.23", "a",
                                 "bench.local", "host_1"])
 def test_a_real_host_passes(ok):
-    out = validate_descriptor(dict(_GOOD, host=ok), worker="hardware",
-                              tool="dump_firmware")
+    out = _v(dict(_GOOD, host=ok))
     assert out["host"] == ok
 
 
@@ -261,25 +282,24 @@ def test_a_path_that_would_misbehave_in_the_retrieval_command_is_rejected(bad):
     """
     payload = dict(_GOOD, path=bad)
     with pytest.raises(DescriptorError, match="path"):
-        validate_descriptor(payload, worker="hardware", tool="dump_firmware")
+        _v(payload)
 
 
-@pytest.mark.parametrize("ok", [
-    "/mnt/bench-store/router-b/fw-0001.bin",
-    "/mnt/s/fw..bin",           # two dots in a NAME is not a `..` COMPONENT
-    "/mnt/s/..hidden",         # accepted HERE though the kit would not build
-                               # it -- see the test docstring
-    "/mnt/s/v1.2.3/fw.bin",
-    "/mnt/s/dump-2026-09-06.bin",
-    "/mnt/s/a b.bin",           # a space is ordinary in a filename
+@pytest.mark.parametrize("path,root,slug", [
+    ("/mnt/bench-store/router-b/fw-0001.bin", "/mnt/bench-store", "router-b"),
+    ("/mnt/s/proj/fw..bin", "/mnt/s", "proj"),           # two dots in a NAME
+    ("/mnt/s/proj/..hidden", "/mnt/s", "proj"),          # daemon looser than the kit
+    ("/mnt/s/proj/v1.2.3/fw.bin", "/mnt/s", "proj"),
+    ("/mnt/s/proj/dump-2026-09-06.bin", "/mnt/s", "proj"),
+    ("/mnt/s/proj/a b.bin", "/mnt/s", "proj"),           # a space is ordinary
 ])
-def test_a_legitimate_path_still_passes(ok):
+def test_a_legitimate_path_still_passes(path, root, slug):
     """The traversal check is COMPONENT-WISE, never a substring search.
     Refusing every path containing the two characters `..` would refuse
     ordinary filenames and buy nothing: `fw..bin` escapes nothing.
 
     `..hidden` is the case where the two packages DELIBERATELY differ, and
-    neither said so until now. pare-worker-kit's `_NAME_RE` requires a
+    neither said so until then. pare-worker-kit's `_NAME_RE` requires a
     leading alphanumeric, so no kit-BUILT path can ever have that basename.
     This function is looser on purpose: it validates descriptors from ANY
     worker, including ones that never used the kit to construct the path, and
@@ -288,15 +308,18 @@ def test_a_legitimate_path_still_passes(ok):
     for a rule the wire contract never stated -- and would buy nothing, since
     a leading dot escapes nothing and is not argument-injection range (that
     is the leading DASH, refused above).
+
+    The paths now carry a project directory because containment is checked
+    against {root}/{slug} (Task 4): the slug the daemon injected is what the
+    path must sit under.
     """
-    out = validate_descriptor(dict(_GOOD, path=ok), worker="hardware",
-                              tool="dump_firmware")
-    assert out["path"] == ok
+    out = _v(dict(_GOOD, path=path), root=root, slug=slug)
+    assert out["path"] == path
 
 
 @pytest.mark.parametrize("accepted", [
-    "/mnt/s/f;rm -rf /", "/mnt/s/$(id)", "/mnt/s/`id`", "/mnt/s/a|b",
-    "/mnt/s/a&b", "/mnt/s/*.bin",
+    "/mnt/s/proj/f;rm -rf /", "/mnt/s/proj/$(id)", "/mnt/s/proj/`id`",
+    "/mnt/s/proj/a|b", "/mnt/s/proj/a&b", "/mnt/s/proj/*.bin",
 ])
 def test_shell_metacharacters_are_deliberately_accepted(accepted):
     """A DECISION, pinned so it is not reversed by reflex.
@@ -320,32 +343,135 @@ def test_shell_metacharacters_are_deliberately_accepted(accepted):
     If a future change reverses this, it should delete this test and replace
     the reasoning -- not leave it passing by accident.
     """
-    out = validate_descriptor(dict(_GOOD, path=accepted), worker="hardware",
-                              tool="dump_firmware")
+    out = _v(dict(_GOOD, path=accepted), root="/mnt/s", slug="proj")
     assert out["path"] == accepted
 
 
-def test_containment_against_the_artifact_root_is_not_checked_here():
-    """The named gap, pinned as behaviour rather than left as a comment.
+def test_the_signature_holds_the_spec_and_the_slug():
+    """The inverse of the gap pin deleted in this round. The old test pinned
+    the ABSENCE of a spec from this signature; its docstring said the day a
+    spec is threaded in, the test and the docstring paragraph move together.
+    This asserts the new half structurally -- not by searching __doc__, which
+    is None under `python -OO` -- so the signature cannot be stripped back to
+    a worker name while the docstring still claims containment."""
+    params = set(inspect.signature(validate_descriptor).parameters)
+    assert {"spec", "slug"} <= params
+    assert "worker" not in params
 
-    `validate_descriptor(payload, *, worker, tool)` is handed a worker NAME,
-    not its WorkerSpec, so it has no artifact_root to compare against and
-    containment is not expressible in this signature. `/etc/shadow` is
-    well-formed by every rule this function knows.
 
-    That is not an oversight to be patched here by guessing a root. It
-    belongs to the caller that resolves the WorkerSpec -- the dispatch path
-    that routes on the produces declaration, which does not exist yet. This
-    test exists so that whoever adds a root to this signature is told to move
-    the paragraph in the docstring at the same time.
-    """
-    for uncontained in ("/etc/shadow", "/some-other-root/router-b/fw.bin"):
-        out = validate_descriptor(dict(_GOOD, path=uncontained),
-                                  worker="hardware", tool="dump_firmware")
-        assert out["path"] == uncontained
-    # The STRUCTURAL half of the gap, asserted rather than a search for words
-    # in __doc__ -- which is None under `python -OO`, where the assertion
-    # would have been vacuous. This is also the more useful trigger: the day
-    # a root is threaded into this signature, this fails and says so.
-    assert not {"root", "artifact_root", "spec"} & set(
-        inspect.signature(validate_descriptor).parameters)
+def test_a_path_outside_the_root_is_refused():
+    """The case the deleted gap test pinned as ACCEPTED: `/etc/shadow` is
+    well-formed by every shape rule and is now refused, because containment
+    is checked and the path is not under the project directory."""
+    with pytest.raises(DescriptorError, match="not under"):
+        _v(dict(_GOOD, path="/etc/shadow"))
+
+
+def test_a_path_under_the_root_but_another_project_is_refused():
+    """The reason containment is against {root}/{slug} and not the root alone
+    (spec §10, Risk 1): a descriptor that lies about its project is under
+    the root and would bind the injected slug to nothing if the check were
+    against the root."""
+    with pytest.raises(DescriptorError, match="not under"):
+        _v(dict(_GOOD, path="/mnt/bench-store/other-proj/fw.bin"))
+
+
+def test_a_path_directly_under_the_root_is_refused():
+    """The worker builds {root}/{slug}/{name}; a file with no project
+    directory component is not a descriptor this contract recognises."""
+    with pytest.raises(DescriptorError, match="not under"):
+        _v(dict(_GOOD, path="/mnt/bench-store/fw.bin"))
+
+
+def test_a_prefix_spoof_of_the_project_directory_is_refused():
+    """`/mnt/bench-store/router-b-evil/...` has the project directory as a
+    STRING prefix. Containment is decided by commonpath on components, not
+    by startswith -- the same reason the traversal check is component-wise."""
+    with pytest.raises(DescriptorError, match="not under"):
+        _v(dict(_GOOD, path="/mnt/bench-store/router-b-evil/fw.bin"))
+
+
+def test_a_trailing_slash_root_is_contained_normally():
+    """An operator's trailing slash in workers.yaml is not a mistake worth
+    refusing: the root is normalised before the comparison, the way the
+    kit's artifact_path normalises it."""
+    out = _v(dict(_GOOD), root="/mnt/bench-store/")
+    assert out["path"] == _GOOD["path"]
+
+
+def test_a_worker_that_declares_no_root_refuses_the_descriptor():
+    """Fail closed at the validator level (ruling R5). Dispatch (P3) refuses
+    earlier, with the operator-facing message; this keeps the function safe
+    to call standalone."""
+    with pytest.raises(DescriptorError, match="artifact_root"):
+        _v(dict(_GOOD), root=None)
+
+
+def test_a_drive_id_mismatch_is_refused_and_names_both():
+    other = "ffffeeee-dddd-4ccc-8bbb-aaaaaaaaaaaa"
+    with pytest.raises(DescriptorError) as e:
+        _v(dict(_GOOD, drive_id=other))
+    msg = str(e.value)
+    assert other in msg and _DRIVE in msg
+
+
+def test_a_worker_without_a_declared_drive_id_refuses_the_descriptor():
+    """A5: the drive id is required whenever the root is; a descriptor cannot
+    be checked against a drive the worker never declared."""
+    with pytest.raises(DescriptorError, match="artifact_drive_id"):
+        _v(dict(_GOOD), drive_id=None)
+
+
+@pytest.mark.parametrize("bad", [
+    "12345678-90AB-4CD0-8E12-34567890ABCD",   # uppercase: a second spelling
+    "1234567890ab4cd08e1234567890abcd",       # no dashes
+    "12345678-90ab-4cd0-8e12-34567890abc",    # final group 11, not 12
+    "12345678-90ab-4cd0-8e12-34567890abcd1",  # final group 13
+    "12345678-90ab-4cd0-8e12-34567890abc\x1b",  # the value is printed into
+                                                # the error an operator reads
+    None, 123,
+])
+def test_a_drive_id_that_is_not_the_sentinel_grammar_is_refused(bad):
+    with pytest.raises(DescriptorError, match="drive_id"):
+        _v(dict(_GOOD, drive_id=bad))
+
+
+@pytest.mark.parametrize("bad", [
+    1757160000.0,                  # the old fixture's epoch float
+    "2026-09-06 12:34:56Z",        # space, not T
+    "2026-09-06T12:34:56+02:00",   # a non-UTC offset
+    "2026-09-06T12:34:56",         # no zone
+    "2026-09-06T12:34:56z",        # lowercase z: one spelling, pinned
+    None,
+])
+def test_a_hashed_at_that_is_not_rfc3339_utc_is_refused(bad):
+    with pytest.raises(DescriptorError, match="hashed_at"):
+        _v(dict(_GOOD, hashed_at=bad))
+
+
+@pytest.mark.parametrize("ok", ["2026-09-06T12:34:56Z",
+                                "2026-09-06T12:34:56.789Z"])
+def test_an_rfc3339_utc_hashed_at_passes(ok):
+    assert _v(dict(_GOOD, hashed_at=ok))["hashed_at"] == ok
+
+
+@pytest.mark.parametrize("bad", [
+    "application",                         # no subtype
+    "/octet-stream",
+    "application/",
+    "application/octet-stream; q=0.5",     # parameters are not part of
+                                            # type/subtype
+    "*/*",                                 # wildcards: a descriptor names
+                                            # what the file IS
+    "application/octet stream",
+    "", None, 123,
+])
+def test_a_media_type_that_is_not_an_iana_type_subtype_is_refused(bad):
+    with pytest.raises(DescriptorError, match="media_type"):
+        _v(dict(_GOOD, media_type=bad))
+
+
+@pytest.mark.parametrize("ok", ["application/octet-stream", "text/plain",
+                                "multipart/related", "TEXT/PLAIN"])
+def test_an_iana_type_subtype_passes(ok):
+    assert _v(dict(_GOOD, media_type=ok))["media_type"] == ok
