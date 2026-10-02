@@ -19,6 +19,40 @@ PRODUCES_ARTIFACT = "artifact"
 
 VALID_PRODUCES = (PRODUCES_RESULT, PRODUCES_ARTIFACT)
 
+ARTIFACT_DESCRIPTOR_FIELDS = ("host", "path", "size", "sha256", "hashed_at",
+                              "media_type", "drive_id")
+"""The seven fields a `produces: artifact` tool must return, in wire order.
+
+Stated here AND in pare-worker-kit, with a guard test on each side, for the
+same reason as PRODUCES_META_KEY above: the two packages are separately
+installed and never share a Python environment. validate_descriptor requires
+exactly these fields and pare_worker_kit's open_artifact builds exactly
+these; a field present on one side and not the other is a descriptor that
+validates on one machine and is refused on the other, with no useful error
+anywhere. All seven are required; none is optional. The eighth field of the
+object that gets published, produced_by, is added by the daemon AFTER
+validation and never travels.
+"""
+
+RESERVED_SLUG_ARG = "project_slug"
+"""The tool-argument name dispatch injects with the project's ArcticBase
+slug. RESERVED_DRIVE_ID_ARG is the same arrangement for the drive id the
+artifact must land on; see it below.
+
+Reserved means the daemon supplies the value: injected at the dispatch
+chokepoint, overwriting whatever the model supplied, so the model never sees
+it as an input it may choose. A worker names its tool-handler parameter after
+this value so the injection lands where the handler expects it -- which is
+why the value must be a legal Python identifier as well as wire vocabulary.
+Stated here AND in pare-worker-kit, with a guard test on each side. Changing
+either value is a wire-breaking change.
+"""
+
+RESERVED_DRIVE_ID_ARG = "expected_drive_id"
+"""The same arrangement as RESERVED_SLUG_ARG, for the drive id. A descriptor
+whose drive_id differs from the injected value is refused.
+"""
+
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
 _HOST_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,252}\Z")

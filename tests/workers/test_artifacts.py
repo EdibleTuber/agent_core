@@ -2,14 +2,42 @@ import inspect
 
 import pytest
 
-from agent_core.workers.artifacts import (PRODUCES_ARTIFACT, PRODUCES_META_KEY,
-                                          PRODUCES_RESULT, VALID_PRODUCES)
+from agent_core.workers.artifacts import (ARTIFACT_DESCRIPTOR_FIELDS,
+                                          PRODUCES_ARTIFACT,
+                                          PRODUCES_META_KEY,
+                                          PRODUCES_RESULT,
+                                          RESERVED_DRIVE_ID_ARG,
+                                          RESERVED_SLUG_ARG,
+                                          VALID_PRODUCES)
 
 
 def test_the_daemon_states_the_wire_constant_itself():
     assert PRODUCES_META_KEY == "agent_core/produces"
     assert VALID_PRODUCES == ("result", "artifact")
     assert (PRODUCES_RESULT, PRODUCES_ARTIFACT) == ("result", "artifact")
+
+
+def test_the_daemon_states_the_descriptor_field_set_itself():
+    """A LOCAL pin, the daemon-side half of the arrangement the meta-key test
+    above states: the field set crosses a wire and is stated independently in
+    each package, so a change to it here must fail a test in THIS suite even
+    when the importorskip guard below skips."""
+    assert ARTIFACT_DESCRIPTOR_FIELDS == ("host", "path", "size", "sha256",
+                                          "hashed_at", "media_type",
+                                          "drive_id")
+    assert len(set(ARTIFACT_DESCRIPTOR_FIELDS)) == len(
+        ARTIFACT_DESCRIPTOR_FIELDS)
+
+
+def test_the_reserved_argument_names_are_stable_wire_literals():
+    """Injected by the daemon at dispatch, named after by worker handlers:
+    wire vocabulary AND Python identifiers. Pinned as literals; changing one
+    is a wire-breaking change."""
+    assert RESERVED_SLUG_ARG == "project_slug"
+    assert RESERVED_DRIVE_ID_ARG == "expected_drive_id"
+    assert RESERVED_SLUG_ARG.isidentifier()
+    assert RESERVED_DRIVE_ID_ARG.isidentifier()
+    assert RESERVED_SLUG_ARG != RESERVED_DRIVE_ID_ARG
 
 
 def test_it_agrees_with_the_worker_kit():
