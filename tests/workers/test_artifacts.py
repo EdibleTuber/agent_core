@@ -215,6 +215,26 @@ def test_the_slug_rule_agrees_with_the_worker_kits():
     assert kit.SLUG_RE.flags == SLUG_RE.flags
 
 
+def test_the_descriptor_contract_agrees_with_the_worker_kit():
+    """The field set and the two reserved argument names are stated on both
+    sides of the wire, and this is what keeps the two statements the same,
+    for the reason the slug-rule guard above gives.
+
+    Named so the CI filter (`-k agrees_with_the_worker_kit`) collects it: the
+    cross-package step fails if a guard matching that filter is skipped or if
+    none is collected.
+
+    Compared as a tuple, not a set: the order is the wire order.
+    """
+    kit = pytest.importorskip(
+        "pare_worker_kit.artifacts",
+        reason="pare-worker-kit is not installed here; the worker-side half "
+               "of this check runs in that package's own suite")
+    assert kit.ARTIFACT_DESCRIPTOR_FIELDS == ARTIFACT_DESCRIPTOR_FIELDS
+    assert kit.RESERVED_SLUG_ARG == RESERVED_SLUG_ARG
+    assert kit.RESERVED_DRIVE_ID_ARG == RESERVED_DRIVE_ID_ARG
+
+
 # Fix round 2: `path` hardened to the same standard as `host`
 @pytest.mark.parametrize("bad", [
     "/mnt/store/../../etc/shadow",   # `..` is resolved by the kernel, so no
