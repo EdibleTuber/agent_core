@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from agent_core.capture.layer import CaptureLayer
 
 from agent_core.workers.artifacts import (PRODUCES_ARTIFACT, PRODUCES_META_KEY,
-                                          PRODUCES_RESULT)
+                                          PRODUCES_RESULT, validate_slug)
 from agent_core.workers.audit import AuditLog
 from agent_core.workers.client_pool import MCPClientPool
 from agent_core.workers.risk import RiskGate, RISK_TIER_META_KEY, resolve_declared_tier
@@ -405,9 +405,71 @@ class RiskAwareToolPool:
         # single resolution path resolve_effective uses -- see its docstring.
         declared, tier_source = self._resolve_declared(worker, tool)
         gen = self.generation(worker)
+        produces = self.produces(worker, tool)
+        spec = slug = None
+        if produces == PRODUCES_ARTIFACT:
+            spec = self.spec_for(worker)
+            slug = getattr(ctx, "project_slug", None)
+            # --- four pre-gate refusals ---
+            if not getattr(spec, "artifact_root", None):
+                self._emit(worker, tool, snapshot, declared, declared, 0,
+                           "validation_failed", None,
+                           f"{spec.name}: artifact_root is not declared; "
+                           f"set artifact_root in workers.yaml to enable "
+                           f"artifact dispatch for this worker")
+                return _ErrorResult(
+                    f"{spec.name}: artifact_root is not declared; "
+                    f"set artifact_root in workers.yaml to enable "
+                    f"artifact dispatch for this worker")
+            if not getattr(spec, "artifact_drive_id", None):
+                self._emit(worker, tool, snapshot, declared, declared, 0,
+                           "validation_failed", None,
+                           f"{spec.name}: artifact_root is set but "
+                           f"artifact_drive_id is not declared; "
+                           f"set artifact_drive_id in workers.yaml to "
+                           f"enable artifact dispatch for this worker")
+                return _ErrorResult(
+                    f"{spec.name}: artifact_root is set but "
+                    f"artifact_drive_id is not declared; "
+                    f"set artifact_drive_id in workers.yaml to "
+                    f"enable artifact dispatch for this worker")
+            if not getattr(spec, "artifact_host", None):
+                self._emit(worker, tool, snapshot, declared, declared, 0,
+                           "validation_failed", None,
+                           f"{spec.name}: artifact_host is not declared; "
+                           f"set artifact_host in workers.yaml to "
+                           f"enable artifact dispatch for this worker")
+                return _ErrorResult(
+                    f"{spec.name}: artifact_host is not declared; "
+                    f"set artifact_host in workers.yaml to "
+                    f"enable artifact dispatch for this worker")
+            if slug is None:
+                self._emit(worker, tool, snapshot, declared, declared, 0,
+                           "validation_failed", None,
+                           f"project slug unavailable for {ctx.cwd}; "
+                           f"artifact dispatch requires a project slug")
+                return _ErrorResult(
+                    f"project slug unavailable for {ctx.cwd}; "
+                    f"artifact dispatch requires a project slug")
+            try:
+                validate_slug(slug)
+            except ValueError:
+                self._emit(worker, tool, snapshot, declared, declared, 0,
+                           "validation_failed", None,
+                           f"invalid project slug for {ctx.cwd}; "
+                           f"artifact dispatch requires a valid project slug")
+                return _ErrorResult(
+                    f"invalid project slug for {ctx.cwd}; "
+                    f"artifact dispatch requires a valid project slug")
         decision = self._gate.evaluate(worker=worker, tool=tool, declared_tier=declared)
         effective = decision.effective_tier
         gate_override = decision.override_reason  # why escalated (None if declared==effective)
+
+        # --- tier floor for artifact tools ---
+        if produces == PRODUCES_ARTIFACT and _TIER_ORDER.get(effective, -1) < _TIER_ORDER["high"]:
+            effective = "high"
+            gate_override = (gate_override + "; " if gate_override else "") + \
+                "produces=artifact tier floor (high)"
 
         session_note: str | None = None
         if effective in ("high", "critical"):

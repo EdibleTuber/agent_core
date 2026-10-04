@@ -43,6 +43,11 @@ class HandlerContext:
     agent: object = None    # Agent; populated by Daemon._handle_connection
     emit: object = None     # Callable[[object], Awaitable[None]]; populated by Daemon
     cwd: str | None = None  # operator's launch cwd, stamped by the CLI; None for non-CLI clients
+    project_slug: str | None = None  # supplied by the host agent — PARE stamps it per message from its
+        # own project resolution; agent_core asks, never derives; None refuses artifact dispatch,
+        # naming the cwd
+    artifact_descriptor: dict | None = None  # set by the pool only after a successfully validated
+        # artifact dispatch; the 8-field object the publisher consumes; never travels the wire
 
 
 class Agent:
