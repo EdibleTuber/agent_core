@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 from agent_core.workers.artifacts import (PRODUCES_ARTIFACT, PRODUCES_META_KEY,
                                           PRODUCES_RESULT, validate_slug)
+from agent_core.workers.artifacts import (ARTIFACT_DESCRIPTOR_FIELDS,
+                                           RESERVED_SLUG_ARG, RESERVED_DRIVE_ID_ARG,
+                                           validate_descriptor, DescriptorError)
 from agent_core.workers.audit import AuditLog
 from agent_core.workers.client_pool import MCPClientPool
 from agent_core.workers.risk import RiskGate, RISK_TIER_META_KEY, resolve_declared_tier
@@ -91,6 +94,37 @@ def _worker_error_message(result) -> str | None:
                 msg = f"{msg}: {detail}"
             return msg[:500]
     return None
+
+
+def _extract_descriptor(result) -> tuple[dict | None, str | None]:
+    """Extract and parse the artifact descriptor from a worker result.
+
+    Rule (R6): ``result.content`` must be exactly one block of type ``"text"``,
+    and ``json.loads`` of its ``text`` must yield a dict.
+
+    The "exactly-one" invariant is refusable and therefore checkable: if a
+    worker returns multiple text blocks, prose instead of JSON, or a JSON
+    array, the daemon can refuse the call with a precise error. This is the
+    extraction layer described in §6:576-582.
+
+    Note: ``structuredContent`` exists in none of the three repos
+    (agent_core, pare, pare_worker_kit), so only text blocks are handled.
+
+    Returns ``(payload, None)`` on success; ``(None, problem)`` otherwise,
+    where ``problem`` names the actual failure (block count, parse error,
+    or non-dict payload).
+    """
+    blocks = getattr(result, "content", None) or []
+    text_blocks = [b for b in blocks if getattr(b, "type", None) == "text"]
+    if len(text_blocks) != 1:
+        return None, f"exactly one text content block required, got {len(text_blocks)}"
+    try:
+        payload = json.loads(text_blocks[0].text)
+    except (ValueError, TypeError):
+        return None, "not a JSON object"
+    if not isinstance(payload, dict):
+        return None, "not a JSON object"
+    return payload, None
 
 
 class RiskAwareToolPool:
@@ -461,6 +495,10 @@ class RiskAwareToolPool:
                 return _ErrorResult(
                     f"invalid project slug for {ctx.cwd}; "
                     f"artifact dispatch requires a valid project slug")
+            # --- Task 3: inject slug and drive_id into arguments ---
+            arguments[RESERVED_SLUG_ARG] = slug
+            arguments[RESERVED_DRIVE_ID_ARG] = spec.artifact_drive_id
+            snapshot = copy.deepcopy(arguments)
         decision = self._gate.evaluate(worker=worker, tool=tool, declared_tier=declared)
         effective = decision.effective_tier
         gate_override = decision.override_reason  # why escalated (None if declared==effective)
@@ -486,17 +524,22 @@ class RiskAwareToolPool:
 
         result = await self._execute_and_audit(
             worker, tool, arguments, snapshot, declared, effective, gate_override,
-            session_note, tier_source, generation=gen,
+            session_note, tier_source, generation=gen, ctx=ctx, spec=spec, slug=slug,
         )
+        # --- Task 3: handle tuple (result, refusal) and restructure capture ---
+        refusal = None
+        if isinstance(result, tuple):
+            result, refusal = result
         if self._capture is not None:
             # Route ALL executed results through the capture layer — including
             # errors — so a failed run stays searchable. The layer stores
             # unconditionally and never stubs an error. (Approval blocks/denials
             # returned earlier and are intentionally not captured: no tool ran.)
             session_id = arguments.get("session_id") if isinstance(arguments, dict) else None
-            return await self._capture.maybe_substitute(worker, tool, result, substitute=capture,
-                                                        session_id=session_id)
-        return result
+            captured = await self._capture.maybe_substitute(worker, tool, result,
+                                                            substitute=capture, session_id=session_id)
+            return _ErrorResult(refusal) if refusal is not None else captured
+        return _ErrorResult(refusal) if refusal is not None else result
 
     def _resolve_send(self, ctx):
         """Prefer the per-request connection channel (ctx.emit); fall back to a
@@ -557,7 +600,7 @@ class RiskAwareToolPool:
         return None  # approved -> proceed
 
     async def _execute_and_audit(self, worker, tool, arguments, snapshot, declared, effective, gate_override, session_note,
-                                 tier_source=None, generation=None):
+                                 tier_source=None, generation=None, ctx=None, spec=None, slug=None):
         start = time.monotonic()
         if generation is not None and generation != self.generation(worker):
             # The generation check at the end of _await_operator is not enough
@@ -618,9 +661,39 @@ class RiskAwareToolPool:
         else:
             outcome = "ok"
             detail = session_note
+        # Task 3: descriptor extraction, validation, reconciliation
+        refusal = None
+        descriptor = None
+        host_note = None
+        if spec is not None and slug is not None and not is_error:
+            payload, problem = _extract_descriptor(result)
+            if problem is not None:
+                refusal = f"{worker}.{tool}: {problem}"
+            else:
+                try:
+                    descriptor = validate_descriptor(payload, spec=spec, tool=tool, slug=slug)
+                except DescriptorError as exc:
+                    refusal = str(exc)
+        if descriptor is not None:
+            if descriptor["host"] != spec.artifact_host:
+                host_note = (f"host mismatch: worker reported {descriptor['host']!r}, "
+                             f"operator artifact_host is {spec.artifact_host!r}")
+            if ctx is not None:
+                desc = {}
+                for f in ARTIFACT_DESCRIPTOR_FIELDS:
+                    desc[f] = spec.artifact_host if f == "host" else descriptor[f]
+                desc["produced_by"] = f"{worker}.{tool}"
+                ctx.artifact_descriptor = desc
+        if refusal is not None:
+            outcome = "validation_failed"
+            detail = refusal
+        if host_note is not None and detail is not None:
+            detail = f"{detail}; {host_note}"
+        elif host_note is not None:
+            detail = host_note
         self._emit(worker, tool, snapshot, declared, effective, latency, outcome, gate_override, detail,
                    tier_source)
-        return result
+        return (result, refusal) if refusal is not None else result
 
     def _emit(self, worker, tool, snapshot, declared, effective, latency_ms, outcome, override_reason, detail,
               tier_source=None):
