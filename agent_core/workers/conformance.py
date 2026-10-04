@@ -16,7 +16,13 @@ import os
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from agent_core.workers.artifacts import PRODUCES_META_KEY, VALID_PRODUCES
+from agent_core.workers.artifacts import (
+    PRODUCES_ARTIFACT,
+    PRODUCES_META_KEY,
+    RESERVED_DRIVE_ID_ARG,
+    RESERVED_SLUG_ARG,
+    VALID_PRODUCES,
+)
 from agent_core.workers.client_pool import describe_failure
 from agent_core.workers.risk import RISK_TIER_META_KEY
 
@@ -91,6 +97,71 @@ def _assert_valid_produces_meta(tool: Any) -> None:
         f"{PRODUCES_META_KEY!r}={produces!r} in _meta, which is not one of "
         f"{VALID_PRODUCES}"
     )
+
+
+def _assert_artifact_reserved_args(tool: Any) -> None:
+    """Assert an artifact-declaring tool exposes the reserved arguments.
+
+    For a tool whose `_meta` declares ``produces: artifact``, its
+    ``inputSchema.properties`` must contain **both**
+    ``{RESERVED_SLUG_ARG!r}`` and ``{RESERVED_DRIVE_ID_ARG!r}``.  The
+    daemon injects these values at the dispatch chokepoint (A4) and the
+    model never sees them as inputs it may choose.  If a worker declares
+    ``produces: artifact`` but omits them from its schema, it cannot
+    receive the injected slug/drive-id, so the violation is discoverable
+    at conformance time (list_tools) instead of surfacing at the 70-second
+    mark during dispatch.
+
+    Non-artifact tools are a no-op — this helper only inspects tools that
+    declare ``produces: artifact``.
+
+    A ``_meta`` that is present but not a dict at all is malformed, not
+    absent, so it fails closed here (identical to the sibling
+    ``_assert_valid_produces_meta``).
+
+    The **result-shape rule is runtime-only until an invocation harness
+    exists** (§6:593-606).  Conformance suites never invoke tools — they
+    only inspect ``list_tools`` output.  Asserting that an artifact tool's
+    result has the correct shape would require calling the tool, which
+    for a real hardware worker means dumping a chip in CI.  Until an
+    invocation harness with a dry-run mode exists, the result-shape rule
+    is enforced at dispatch only, at runtime.  This helper does not
+    assert result shapes.
+    """
+    meta = getattr(tool, "meta", None)
+    if meta is None:
+        return
+    assert isinstance(meta, dict), (
+        f"tool {getattr(tool, 'name', tool)!r} has a non-dict _meta "
+        f"({meta!r}); cannot check its {PRODUCES_META_KEY!r} declaration"
+    )
+    if PRODUCES_META_KEY not in meta:
+        return
+    produces = meta[PRODUCES_META_KEY]
+    if produces != PRODUCES_ARTIFACT:
+        return
+
+    schema = getattr(tool, "inputSchema", None)
+    if schema is None:
+        return
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if properties is None:
+        properties = {}
+
+    if RESERVED_SLUG_ARG not in properties:
+        raise AssertionError(
+            f"tool {getattr(tool, 'name', tool)!r} declares "
+            f"{PRODUCES_META_KEY!r}={PRODUCES_ARTIFACT!r} but its "
+            f"inputSchema.properties is missing the reserved argument "
+            f"{RESERVED_SLUG_ARG!r}"
+        )
+    if RESERVED_DRIVE_ID_ARG not in properties:
+        raise AssertionError(
+            f"tool {getattr(tool, 'name', tool)!r} declares "
+            f"{PRODUCES_META_KEY!r}={PRODUCES_ARTIFACT!r} but its "
+            f"inputSchema.properties is missing the reserved argument "
+            f"{RESERVED_DRIVE_ID_ARG!r}"
+        )
 
 
 @runtime_checkable
@@ -272,6 +343,7 @@ async def assert_streamable_http_conformance(endpoint: str) -> None:
         )
         _assert_valid_risk_tier_meta(tool)
         _assert_valid_produces_meta(tool)
+        _assert_artifact_reserved_args(tool)
 
 
 async def assert_stdio_conformance(spec: "WorkerSpec") -> None:
@@ -350,6 +422,7 @@ async def assert_stdio_conformance(spec: "WorkerSpec") -> None:
             )
             _assert_valid_risk_tier_meta(tool)
             _assert_valid_produces_meta(tool)
+            _assert_artifact_reserved_args(tool)
     finally:
         try:
             await client.close()
