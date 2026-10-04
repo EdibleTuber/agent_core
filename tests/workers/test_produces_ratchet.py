@@ -37,8 +37,10 @@ class _Inner(MCPClientPool):
 
 
 def _pool(tmp_path, listing):
+    _DRIVE = "12345678-90ab-4cd0-8e12-34567890abcd"
     spec = WorkerSpec(name="hardware", transport="stdio", command="/bin/true",
-                      risk_default="high", artifact_root="/mnt/bench-store")
+                      risk_default="high", artifact_root="/mnt/bench-store",
+                      artifact_drive_id=_DRIVE, artifact_host="hardware")
     return RiskAwareToolPool(
         inner=_Inner([spec], listing), specs={"hardware": spec},
         risk_gate=RiskGate(overrides=[]),

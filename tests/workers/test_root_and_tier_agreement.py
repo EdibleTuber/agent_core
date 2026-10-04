@@ -22,8 +22,10 @@ ROOTS_THE_WORKER_REFUSES = ["/a/../b", "//mnt/store", "//a", "//",
 
 
 def _spec(root):
+    _DRIVE = "12345678-90ab-4cd0-8e12-34567890abcd"
     return WorkerSpec(name="hardware", transport="stdio", command="/bin/true",
-                      risk_default="high", artifact_root=root)
+                      risk_default="high", artifact_root=root,
+                      artifact_drive_id=_DRIVE, artifact_host="hardware")
 
 
 @pytest.mark.parametrize("root", ROOTS_THE_WORKER_ACCEPTS)
