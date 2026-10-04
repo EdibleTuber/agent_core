@@ -15,6 +15,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agent_core.workers.artifacts import _HOST_RE
+from urllib.parse import urlsplit
+
 
 WORKER_CONTRACT_VERSION = 1
 """Contract major version. Workers and agents exchange this at initialize-time.
@@ -145,6 +148,35 @@ class WorkerSpec(BaseModel):
     WORKER, next to artifact_path in pare-worker-kit.
     """
 
+    artifact_host: str | None = None
+    """Operator-declared reachable address for this worker's artifact host.
+
+    The host is the destination name used in ``scp <host>:<path>`` when
+    retrieving artifacts written by this worker.  It is validated at config
+    load against the same grammar that the daemon uses for descriptor
+    validation, so a malformed value is caught early.
+
+    **Defaulting.**  When the transport is ``streamable_http`` or
+    ``http_job_api`` and ``artifact_host`` is unset, it defaults to the
+    hostname parsed from ``endpoint`` (via ``urlsplit(endpoint).hostname``).
+    The operator does not need to repeat it.
+
+    **stdio constraint.**  When the transport is ``stdio`` and
+    ``artifact_root`` is set (meaning the worker may produce artifacts), the
+    operator *must* declare ``artifact_host`` explicitly -- it cannot be
+    defaulted, because stdio workers have no endpoint to derive one from.
+
+    **Inert without a root.**  When ``artifact_root`` is ``None`` the field
+    is inert: a declared value is accepted and stored, but no completeness
+    error is raised.  This reflects the fact that the host is only meaningful
+    in the context of artifact dispatch.
+
+    **IPv6 / dash-leading refusal.**  The host grammar (``_HOST_RE``)
+    rejects IPv6 literals (no colons or brackets) and any host beginning
+    with a dash (argument injection range).  This is a fail-closed check
+    at load time.
+    """
+
     @field_validator("artifact_root")
     @classmethod
     def artifact_root_is_usable(cls, v: str | None) -> str | None:
@@ -211,6 +243,79 @@ class WorkerSpec(BaseModel):
                 raise ValueError(
                     f"worker {self.name!r}: transport 'stdio' requires command"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_artifact_declaration(self) -> "WorkerSpec":
+        """Enforce the artifact-host / artifact-drive-id declaration rules.
+
+        R9 (artifact_host):
+
+        1. **Endpoint transport defaulting.**  When the transport is
+           ``streamable_http`` or ``http_job_api`` and ``artifact_host`` is
+           unset, default it to ``urlsplit(endpoint).hostname``.  If the
+           endpoint has no hostname (empty or absent), raise a
+           ``ValidationError`` -- the operator must declare it explicitly.
+
+        2. **stdio constraint.**  When the transport is ``stdio`` and
+           ``artifact_root`` is set, ``artifact_host`` *must* be declared.
+           There is no endpoint to default from, so the operator must name
+           the host explicitly.  A missing host raises a
+           ``ValidationError``.
+
+        3. **Host grammar validation.**  Any declared (or defaulted)
+           ``artifact_host`` is validated against ``_HOST_RE`` at load
+           time.  IPv6 literals, dash-leading names, and other malformed
+           values are refused (fail-closed).
+
+        4. **Inert without a root.**  When ``artifact_root`` is ``None``
+           and ``artifact_host`` is valid, no completeness error is raised.
+           The field is accepted but inert -- the host only matters when
+           artifact dispatch is active.
+
+        R10 / A5 (artifact_drive_id):
+
+        5. **Drive-id required with root.**  When ``artifact_root`` is set,
+           ``artifact_drive_id`` must also be set (non-``None``).  A missing
+           drive-id raises a ``ValidationError`` naming the missing field.
+        """
+        # --- R9d: endpoint transport defaulting -------------------------
+        if self.artifact_root is not None:
+            if self.transport in ("streamable_http", "http_job_api"):
+                if self.artifact_host is None:
+                    parsed = urlsplit(self.endpoint or "")
+                    hostname = parsed.hostname or ""
+                    if not hostname:
+                        raise ValueError(
+                            f"worker {self.name!r}: endpoint {self.endpoint!r} "
+                            f"has no hostname; declare artifact_host explicitly"
+                        )
+                    self.artifact_host = hostname
+
+        # --- R9c: stdio + root requires explicit host -------------------
+        if self.transport == "stdio" and self.artifact_root is not None:
+            if self.artifact_host is None:
+                raise ValueError(
+                    f"worker {self.name!r}: transport 'stdio' with "
+                    f"artifact_root requires artifact_host to be declared"
+                )
+
+        # --- R9e: host grammar validation (fail-closed) -----------------
+        if self.artifact_host is not None:
+            if not _HOST_RE.match(self.artifact_host):
+                raise ValueError(
+                    f"worker {self.name!r}: artifact_host "
+                    f"{self.artifact_host!r} does not match the required "
+                    f"hostname grammar"
+                )
+
+        # --- R10 / A5: drive-id required with root --------------------
+        if self.artifact_root is not None and self.artifact_drive_id is None:
+            raise ValueError(
+                f"worker {self.name!r}: artifact_root is set but "
+                f"artifact_drive_id is not; both must be declared together"
+            )
+
         return self
 
 
