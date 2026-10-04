@@ -16,6 +16,7 @@ from agent_core.conversation import Conversation
 from agent_core.workers.artifacts import (
     PRODUCES_ARTIFACT, PRODUCES_META_KEY,
     ARTIFACT_DESCRIPTOR_FIELDS,
+    RESERVED_SLUG_ARG, RESERVED_DRIVE_ID_ARG,
 )
 from agent_core.workers.audit import AuditLog
 from agent_core.workers.client_pool import MCPClientPool
@@ -68,6 +69,10 @@ class _Inner(MCPClientPool):
         if self.return_error:
             _R.isError = True
             _R.content = [{"text": "boom"}]
+        elif isinstance(arguments, dict) and RESERVED_SLUG_ARG in arguments:
+            desc = _valid_descriptor(arguments[RESERVED_DRIVE_ID_ARG])
+            desc["path"] = f"/mnt/bench-store/{arguments[RESERVED_SLUG_ARG]}/fw.bin"
+            return _fake_result(json.dumps(desc))
         return _R()
 
 
@@ -681,7 +686,7 @@ async def test_d26_non_json_text_refused(tmp_path):
     pool._inner.call_tool = _stub
     result = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     assert result.isError is True
-    assert "not a JSON object" in result.content[0].text.lower()
+    assert "not a json object" in result.content[0].text.lower()
     # Capture received the verbatim worker result
     assert len(captured) == 1
     _, _, captured_result = captured[0]
@@ -725,7 +730,7 @@ async def test_d27_json_array_refused(tmp_path):
     pool._inner.call_tool = _stub
     result = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     assert result.isError is True
-    assert "not a JSON object" in result.content[0].text.lower()
+    assert "not a json object" in result.content[0].text.lower()
     # Capture received the verbatim worker result
     assert len(captured) == 1
     _, _, captured_result = captured[0]
