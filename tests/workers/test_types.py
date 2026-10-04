@@ -209,3 +209,170 @@ def test_the_real_workers_yaml_still_loads():
         pytest.skip("PARE checkout not present next to agent_core")
     reg = WorkerRegistry.load(live)
     assert reg.all(), "the live catalog parsed to nothing"
+
+
+# ---------------------------------------------------------------------------
+# Task 1: WorkerSpec.artifact_host  (D1 – D11)
+# ---------------------------------------------------------------------------
+from urllib.parse import urlsplit
+
+_D5_DRIVE = "12345678-90ab-4cd0-8e12-34567890abcd"
+"""A valid UUID for artifact_drive_id used by D5 and D6."""
+
+
+def test_d1_endpoint_defaults_artifact_host_from_url_hostname():
+    """D1: endpoint transport (streamable_http), artifact_root set, no
+    artifact_host ⇒ loads, and spec.artifact_host == urlsplit(endpoint).
+    hostname (fixture endpoint http://100.97.133.126:9101/mcp ⇒ "100.97.
+    133.126")."""
+    spec = WorkerSpec(
+        name="bench",
+        endpoint="http://100.97.133.126:9101/mcp",
+        transport="streamable_http",
+        risk_default="medium",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=_D5_DRIVE,
+    )
+    assert spec.artifact_host == "100.97.133.126"
+
+
+def test_d2_stdio_with_root_requires_artifact_host():
+    """D2: transport=stdio, root set, no host ⇒ ValidationError naming
+    artifact_host (and that stdio cannot default it)."""
+    with pytest.raises(ValidationError, match="artifact_host"):
+        WorkerSpec(
+            name="bench",
+            transport="stdio",
+            risk_default="medium",
+            command="frida-mcp",
+            artifact_root="/mnt/bench-store",
+            artifact_drive_id=_D5_DRIVE,
+        )
+
+
+def test_d3_stdio_with_root_and_explicit_host_loads():
+    """D3: stdio + root + artifact_host="pare-bench" ⇒ loads,
+    spec.artifact_host == "pare-bench"."""
+    spec = WorkerSpec(
+        name="bench",
+        transport="stdio",
+        risk_default="medium",
+        command="frida-mcp",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=_D5_DRIVE,
+        artifact_host="pare-bench",
+    )
+    assert spec.artifact_host == "pare-bench"
+
+
+def test_d4_endpoint_explicit_host_wins_over_default():
+    """D4: endpoint + root + explicit host ⇒ loads; explicit wins over the
+    default."""
+    spec = WorkerSpec(
+        name="bench",
+        endpoint="http://100.97.133.126:9101/mcp",
+        transport="streamable_http",
+        risk_default="medium",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=_D5_DRIVE,
+        artifact_host="my-bench-host",
+    )
+    assert spec.artifact_host == "my-bench-host"
+
+
+def test_d5_ipv6_literal_host_refused():
+    """D5: artifact_host="::1" (IPv6 literal) ⇒ ValidationError
+    (_HOST_RE admits no colons/brackets)."""
+    with pytest.raises(ValidationError, match="artifact_host"):
+        WorkerSpec(
+            name="bench",
+            endpoint="http://100.97.133.126:9101/mcp",
+            transport="streamable_http",
+            risk_default="medium",
+            artifact_root="/mnt/bench-store",
+            artifact_drive_id=_D5_DRIVE,
+            artifact_host="::1",
+        )
+
+
+def test_d6_dash_leading_host_refused():
+    """D6: artifact_host="-evil" (dash-leading — an ssh/scp argument, not a
+    destination) ⇒ ValidationError."""
+    with pytest.raises(ValidationError, match="artifact_host"):
+        WorkerSpec(
+            name="bench",
+            endpoint="http://100.97.133.126:9101/mcp",
+            transport="streamable_http",
+            risk_default="medium",
+            artifact_root="/mnt/bench-store",
+            artifact_drive_id=_D5_DRIVE,
+            artifact_host="-evil",
+        )
+
+
+def test_d7_endpoint_no_hostname_no_host_error():
+    """D7: root set, endpoint with no hostname (e.g. http://:9101/mcp), no
+    host ⇒ ValidationError — cannot be defaulted; declare explicitly."""
+    with pytest.raises(ValidationError, match="artifact_host"):
+        WorkerSpec(
+            name="bench",
+            endpoint="http://:9101/mcp",
+            transport="streamable_http",
+            risk_default="medium",
+            artifact_root="/mnt/bench-store",
+            artifact_drive_id=_D5_DRIVE,
+        )
+
+
+def test_d8_root_without_artifact_drive_id_fails():
+    """D8 (A5): root set, artifact_drive_id None ⇒ ValidationError naming
+    artifact_drive_id."""
+    with pytest.raises(ValidationError, match="artifact_drive_id"):
+        WorkerSpec(
+            name="bench",
+            endpoint="http://100.97.133.126:9101/mcp",
+            transport="streamable_http",
+            risk_default="medium",
+            artifact_root="/mnt/bench-store",
+            artifact_drive_id=None,
+        )
+
+
+def test_d9_root_with_valid_drive_id_loads():
+    """D9 (P-pin): root set + a valid artifact_drive_id ⇒ loads."""
+    spec = WorkerSpec(
+        name="bench",
+        endpoint="http://100.97.133.126:9101/mcp",
+        transport="streamable_http",
+        risk_default="medium",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=_D5_DRIVE,
+    )
+    assert spec.artifact_root == "/mnt/bench-store"
+    assert spec.artifact_drive_id == _D5_DRIVE
+
+
+def test_d10_no_root_no_host_no_drive_id_loads():
+    """D10 (P-pin): no root, no host, no drive id ⇒ loads, and
+    getattr(spec, "artifact_host", None) is None."""
+    spec = WorkerSpec(
+        name="bench",
+        transport="stdio",
+        risk_default="medium",
+        command="frida-mcp",
+    )
+    assert getattr(spec, "artifact_host", None) is None
+
+
+def test_d11_no_root_declared_host_loads_inert():
+    """D11: no root + declared artifact_host="pare-bench" ⇒ loads, inert
+    (R9d)."""
+    spec = WorkerSpec(
+        name="bench",
+        transport="stdio",
+        risk_default="medium",
+        command="frida-mcp",
+        artifact_host="pare-bench",
+    )
+    assert spec.artifact_host == "pare-bench"
+    assert spec.artifact_root is None

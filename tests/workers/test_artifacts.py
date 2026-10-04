@@ -74,7 +74,7 @@ _GOOD = {
 def _spec(root="/mnt/bench-store", drive_id=_DRIVE):
     return WorkerSpec(name="hardware", transport="stdio", command="/bin/true",
                       risk_default="high", artifact_root=root,
-                      artifact_drive_id=drive_id)
+                      artifact_drive_id=drive_id, artifact_host="pare-bench")
 
 
 def _v(payload, *, root="/mnt/bench-store", drive_id=_DRIVE, slug="router-b"):
@@ -417,9 +417,22 @@ def test_a_drive_id_mismatch_is_refused_and_names_both():
 
 def test_a_worker_without_a_declared_drive_id_refuses_the_descriptor():
     """A5: the drive id is required whenever the root is; a descriptor cannot
-    be checked against a drive the worker never declared."""
-    with pytest.raises(DescriptorError, match="artifact_drive_id"):
-        _v(dict(_GOOD), drive_id=None)
+    be checked against a drive the worker never declared.
+
+    NOTE: this test used to exercise ``validate_descriptor`` with
+    ``artifact_drive_id=None`` (the spec was constructed successfully and the
+    validator caught the None). A5 now fires at the ``WorkerSpec`` level, so
+    the spec construction itself raises ``ValidationError``.  This test is
+    superseded — the same invariant is verified by D8 in ``test_types.py``.
+    We keep a minimal pin here that the spec-level check fires.
+    """
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="artifact_drive_id"):
+        WorkerSpec(
+            name="hardware", transport="stdio", command="/bin/true",
+            risk_default="high", artifact_root="/mnt/bench-store",
+            artifact_drive_id=None, artifact_host="pare-bench",
+        )
 
 
 @pytest.mark.parametrize("bad", [
