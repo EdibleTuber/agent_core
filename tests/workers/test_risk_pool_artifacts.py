@@ -240,6 +240,7 @@ async def test_d15_artifact_root_none_refused(tmp_path):
     ctx = _ctx(project_slug="bench-slug")
     out = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     assert out.isError is True
+    assert "artifact_root" in out.content[0].text
     assert sent == []
     rows = _audit_rows(tmp_path)
     assert rows[0]["outcome"] == "validation_failed"
@@ -271,6 +272,7 @@ async def test_d16_artifact_drive_id_none_refused(tmp_path):
     ctx = _ctx(project_slug="bench-slug")
     out = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     assert out.isError is True
+    assert "artifact_drive_id" in out.content[0].text
     assert sent == []
     rows = _audit_rows(tmp_path)
     assert rows[0]["outcome"] == "validation_failed"
@@ -303,6 +305,7 @@ async def test_d17_artifact_host_none_refused(tmp_path):
     ctx = _ctx(project_slug="bench-slug")
     out = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     assert out.isError is True
+    assert "artifact_host" in out.content[0].text
     assert sent == []
     rows = _audit_rows(tmp_path)
     assert rows[0]["outcome"] == "validation_failed"
@@ -362,6 +365,7 @@ async def test_d19_high_artifact_approval_sent(tmp_path):
     assert len(sent) == 1
     rows = _audit_rows(tmp_path)
     assert rows[0]["effective_tier"] == "high"
+    assert rows[0]["outcome"] == "hitl_approved"
     # The floor should NOT be mentioned: this tool is already high
     assert "tier floor" not in (rows[0].get("override_reason") or "").lower()
 
@@ -372,14 +376,15 @@ async def test_d19_high_artifact_approval_sent(tmp_path):
 
 @pytest.mark.asyncio
 async def test_d20_critical_stays_critical(tmp_path):
-    """D20: critical artifact tool => stays critical (floor never lowers);
-    approval + rationale path unchanged."""
+    """D20: wire tier (critical) escalates above the spec default (high);
+    the floor neither adds nor changes it — critical stays critical.
+    Approval + rationale path unchanged."""
     drive = str(uuid.uuid4())
     spec = WorkerSpec(
         name="hw",
         transport="streamable_http",
         endpoint="http://100.97.133.126:9101/mcp",
-        risk_default="critical",
+        risk_default="high",
         artifact_root="/mnt/bench-store",
         artifact_drive_id=drive,
     )
@@ -395,4 +400,7 @@ async def test_d20_critical_stays_critical(tmp_path):
     await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     assert len(sent) == 1
     rows = _audit_rows(tmp_path)
+    assert rows[0]["declared_tier"] == "critical"
     assert rows[0]["effective_tier"] == "critical"
+    assert rows[0]["outcome"] == "hitl_approved"
+    assert "tier floor" not in (rows[0].get("override_reason") or "").lower()
