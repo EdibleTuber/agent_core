@@ -13,7 +13,7 @@ from agent_core.conversation import Conversation
 from agent_core.workers.artifacts import PRODUCES_ARTIFACT, PRODUCES_META_KEY
 from agent_core.workers.audit import AuditLog
 from agent_core.workers.client_pool import MCPClientPool
-from agent_core.workers.risk import RiskGate
+from agent_core.workers.risk import RiskGate, RISK_TIER_META_KEY
 from agent_core.workers.risk_pool import RiskAwareToolPool
 from agent_core.workers.tool_approval import (
     ToolApprovalRegistry,
@@ -32,9 +32,9 @@ class _Tool:
         self.name = name
         self.meta = {}
         if tier is not None:
-            self.meta["agent_core/tier"] = tier
+            self.meta[RISK_TIER_META_KEY] = tier
         if produces is not None:
-            self.meta["agent_core/produces"] = produces
+            self.meta[PRODUCES_META_KEY] = produces
 
 
 class _Listing:
