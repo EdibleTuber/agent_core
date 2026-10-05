@@ -679,9 +679,7 @@ class RiskAwareToolPool:
         artifact_drive_id-None, artifact_host-None, slug-None, slug-invalid).
         Pre-gate means effective tier is the declared tier, latency is zero,
         and there is no override reason. The row carries the tier provenance
-        ``tier_source`` as computed by ``_resolve_declared`` — pre-gate rows
-        previously recorded ``tier_source`` as ``None`` because the argument
-        was omitted.
+        ``tier_source`` as computed by ``_resolve_declared``.
         """
         self._emit(worker, tool, snapshot, declared, declared, 0,
                    "validation_failed", None, detail, tier_source)

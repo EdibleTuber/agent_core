@@ -203,9 +203,9 @@ def validate_descriptor(payload, *, spec: WorkerSpec, tool: str, slug: str) -> d
     by the root and is another project's dump.
 
     A worker whose `artifact_root` is None refuses every descriptor, as does
-    one whose `artifact_drive_id` is None: the dispatch path (which lands
-    after this) refuses earlier, with the operator-facing message, and these
-    refusals keep the function safe to call standalone.
+    one whose `artifact_drive_id` is None: the dispatch path refuses earlier,
+    with the operator-facing message, and these refusals keep the function
+    safe to call standalone.
 
     THE DRIVE ID IS COMPARED, NOT JUST FORM-CHECKED. `drive_id` must match
     the sentinel's UUID grammar AND equal `spec.artifact_drive_id`; a
@@ -213,16 +213,15 @@ def validate_descriptor(payload, *, spec: WorkerSpec, tool: str, slug: str) -> d
     names, and the error names both values so the operator can see which is
     which.
 
-    THE REMAINING GAP: `host` is checked for SHAPE and never against the
-    worker it came from. `_HOST_RE` accepts any well-formed hostname, so a
-    compromised worker A can return `host: "bench-b"` and aim the operator's
-    retrieval at a machine of its choosing -- which is what makes the
-    remote-shell caveat above reachable at all. This function now RECEIVES
-    the WorkerSpec but still does not reconcile the host: the endpoint field
-    (`artifact_host`) is not on the spec yet, and lands with the dispatch
-    wiring. Until it does, host stays shape-only on purpose, and the
-    dispatch path must reconcile a descriptor's `host` with the spec it
-    dispatched to.
+    HOST IS SHAPE-CHECKED HERE, RECONCILED AT DISPATCH. `_HOST_RE` accepts
+    any well-formed hostname, so this function alone cannot stop a
+    compromised worker from returning `host: "bench-b"` and aiming the
+    operator's retrieval at a machine of its choosing -- which is what
+    makes the remote-shell caveat above reachable at all. The dispatch path
+    closes the gap: RiskAwareToolPool.call_tool notes a host mismatch in
+    the audit detail when the descriptor's host differs from
+    `spec.artifact_host`, and the handoff descriptor carries the
+    operator-declared value, never the worker's claim.
     """
     where = f"{spec.name}.{tool}"
     if not isinstance(payload, dict):

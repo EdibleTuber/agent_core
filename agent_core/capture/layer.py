@@ -55,7 +55,7 @@ class CaptureLayer:
         text = stringify_result(result)
         try:
             value = json.loads(text)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             value = text  # opaque blob / error text -> degenerate row
         rows = infer_rows(value)
         body_bytes = len(text.encode("utf-8"))
