@@ -142,8 +142,6 @@ def _assert_artifact_reserved_args(tool: Any) -> None:
         return
 
     schema = getattr(tool, "inputSchema", None)
-    if schema is None:
-        return
     properties = schema.get("properties") if isinstance(schema, dict) else None
     if properties is None:
         properties = {}
