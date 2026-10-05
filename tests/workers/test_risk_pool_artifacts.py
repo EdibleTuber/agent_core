@@ -232,7 +232,7 @@ async def test_d13_no_project_slug_refused(tmp_path):
 
 @pytest.mark.asyncio
 async def test_d14_invalid_slug_refused(tmp_path):
-    """D14: project_slug='../../evil' is refused; message names the cwd and
+    """D14: project_slug='../evil' is refused; message names the cwd and
     does NOT contain the raw slug; inner not called; validation_failed row."""
     drive = str(uuid.uuid4())
     spec = WorkerSpec(
@@ -599,6 +599,8 @@ async def test_d24_happy_path_handoff(tmp_path):
     assert ctx.artifact_descriptor is not None
     # 8 keys: 7 from ARTIFACT_DESCRIPTOR_FIELDS + produced_by
     assert set(ctx.artifact_descriptor.keys()) == set(ARTIFACT_DESCRIPTOR_FIELDS) | {"produced_by"}
+    # order pinned too: descriptor fields first, produced_by last
+    assert list(ctx.artifact_descriptor) == list(ARTIFACT_DESCRIPTOR_FIELDS) + ["produced_by"]
     assert len(ctx.artifact_descriptor) == 8
     # host reconciled to spec's artifact_host
     assert ctx.artifact_descriptor["host"] == "100.97.133.126"
@@ -657,7 +659,7 @@ async def test_d25_two_text_blocks_refused(tmp_path):
     # Model gets the refusal
     assert result.isError is True
     assert "exactly one text content block" in result.content[0].text
-    assert "2" in result.content[0].text
+    assert "got 2" in result.content[0].text
     # Capture received the verbatim worker result (not the refusal)
     assert len(captured) == 1
     _, _, captured_result = captured[0]
