@@ -218,9 +218,12 @@ async def test_d13_no_project_slug_refused(tmp_path):
     assert "unavailable" in out.content[0].text
     assert "/mnt/secondary/projects/PARE" in out.content[0].text
     assert sent == []
+    assert pool._inner.calls == []
     rows = _audit_rows(tmp_path)
     assert rows[0]["outcome"] == "validation_failed"
     assert "/mnt/secondary/projects/PARE" in (rows[0]["detail"] or "")
+    # tier_source is the provenance from _resolve_declared
+    assert rows[0]["tier_source"] == "floor"
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +254,7 @@ async def test_d14_invalid_slug_refused(tmp_path):
     assert "/mnt/secondary/projects/PARE" in out.content[0].text
     assert "../evil" not in out.content[0].text  # raw slug must NOT appear
     assert sent == []
+    assert pool._inner.calls == []
     rows = _audit_rows(tmp_path)
     assert rows[0]["outcome"] == "validation_failed"
 
@@ -280,6 +284,7 @@ async def test_d15_artifact_root_none_refused(tmp_path):
     assert out.isError is True
     assert "artifact_root is not declared" in out.content[0].text
     assert sent == []
+    assert pool._inner.calls == []
     rows = _audit_rows(tmp_path)
     assert rows[0]["outcome"] == "validation_failed"
 
@@ -312,6 +317,7 @@ async def test_d16_artifact_drive_id_none_refused(tmp_path):
     assert out.isError is True
     assert "artifact_drive_id" in out.content[0].text
     assert sent == []
+    assert pool._inner.calls == []
     rows = _audit_rows(tmp_path)
     assert rows[0]["outcome"] == "validation_failed"
 
@@ -345,6 +351,7 @@ async def test_d17_artifact_host_none_refused(tmp_path):
     assert out.isError is True
     assert "artifact_host" in out.content[0].text
     assert sent == []
+    assert pool._inner.calls == []
     rows = _audit_rows(tmp_path)
     assert rows[0]["outcome"] == "validation_failed"
 
@@ -565,15 +572,29 @@ async def test_d24_happy_path_handoff(tmp_path):
     )
     reg = ToolApprovalRegistry()
     send, sent = _approval_send(reg)
+    captured = []
+    class _CaptureStub:
+        async def maybe_substitute(self, worker, tool, result, substitute=True, session_id=None):
+            captured.append((worker, tool, result))
+            return result
     pool = _pool_with_spec(spec, _Listing([_Tool("dump_firmware", tier="low", produces="artifact")]),
-                           reg=reg, audit_dir=tmp_path, send=send)
+                           reg=reg, audit_dir=tmp_path, send=send, capture=_CaptureStub())
     await pool.list_tools("hw")
     ctx = _ctx(project_slug="bench-slug-abc123")
-    async def _stub(*a, **kw): return _fake_result(json.dumps(desc))
+    # Bind the stub's return to a stable name for identity checks
+    stable_result = _fake_result(json.dumps(desc))
+    async def _stub(*a, **kw): return stable_result
     pool._inner.call_tool = _stub
     result = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     # Result passes through verbatim (not an error)
     assert not getattr(result, "isError", False)
+    # Capture received the verbatim worker result (identity preserved)
+    assert len(captured) == 1
+    _, _, captured_result = captured[0]
+    assert captured_result is stable_result
+    # The captured descriptor has NO "produced_by" key (handoff field never
+    # reaches capture — produced_by is set on ctx.artifact_descriptor only)
+    assert "produced_by" not in json.loads(captured_result.content[0].text)
     # ctx.artifact_descriptor is set
     assert ctx.artifact_descriptor is not None
     # 8 keys: 7 from ARTIFACT_DESCRIPTOR_FIELDS + produced_by
@@ -846,18 +867,31 @@ async def test_d30_host_mismatch_reconciled(tmp_path):
     )
     reg = ToolApprovalRegistry()
     send, sent = _approval_send(reg)
+    captured = []
+    class _CaptureStub:
+        async def maybe_substitute(self, worker, tool, result, substitute=True, session_id=None):
+            captured.append((worker, tool, result))
+            return result
     pool = _pool_with_spec(spec, _Listing([_Tool("dump_firmware", tier="low", produces="artifact")]),
-                           reg=reg, audit_dir=tmp_path, send=send)
+                           reg=reg, audit_dir=tmp_path, send=send, capture=_CaptureStub())
     await pool.list_tools("hw")
     ctx = _ctx(project_slug="bench-slug-abc123")
+    # Bind the stub's return to a stable name for identity checks
     class _R:
         content = [type("_B", (), {"type": "text", "text": json.dumps(desc)})()]
         isError = False
-    async def _stub(*a, **kw): return _R()
+    stable_result = _R()
+    async def _stub(*a, **kw): return stable_result
     pool._inner.call_tool = _stub
     result = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     # NOT refused — result passes through
     assert not getattr(result, "isError", False)
+    # Capture received the verbatim worker result (identity preserved)
+    assert len(captured) == 1
+    _, _, captured_result = captured[0]
+    assert captured_result is stable_result
+    # The captured descriptor has NO "produced_by" key
+    assert "produced_by" not in json.loads(captured_result.content[0].text)
     # ctx.artifact_descriptor host reconciled to spec's
     assert ctx.artifact_descriptor is not None
     assert ctx.artifact_descriptor["host"] == "100.97.133.126"
@@ -940,6 +974,10 @@ async def test_d32_dispatch_exception_error_result(tmp_path):
     result = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
     assert result.isError is True
     assert ctx.artifact_descriptor is None
+    # Audit row is 'error' (dispatch-exception path emits 'error' before
+    # extraction/validation — never validation_failed)
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["outcome"] == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -1039,3 +1077,88 @@ async def test_d35_non_artifact_tool_list_args_no_error(tmp_path):
     ctx = _ctx(project_slug="bench-slug")
     result = await pool.call_tool("hw", "read_uart", ["not", "a", "dict"], ctx=ctx)
     assert not getattr(result, "isError", False)
+
+
+# ---------------------------------------------------------------------------
+# Landing review: N1 (deep-JSON RecursionError) and N2 (ctx=None fail closed)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_landing_n1_deep_nested_json_refused_captures_and_audits(tmp_path):
+    """N1: a worker returning deeply nested JSON (e.g. "[" * 100000) causes
+    CPython's ``json.loads`` to raise ``RecursionError`` — a ``RuntimeError``
+    subclass, not caught by ``except (ValueError, TypeError)`` — and the error
+    escapes after dispatch, leaving no audit row and no capture.
+
+    After the fix: the worker result must be refused like any other malformed
+    descriptor, with the audit row and the verbatim capture intact.
+    """
+    drive = str(uuid.uuid4())
+    spec = WorkerSpec(
+        name="hw",
+        transport="streamable_http",
+        endpoint="http://100.97.133.126:9101/mcp",
+        risk_default="low",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=drive,
+        artifact_host="100.97.133.126",
+    )
+    reg = ToolApprovalRegistry()
+    send, sent = _approval_send(reg)
+    captured = []
+    class _CaptureStub:
+        async def maybe_substitute(self, worker, tool, result, substitute=True, session_id=None):
+            captured.append((worker, tool, result))
+            return result
+    pool = _pool_with_spec(spec, _Listing([_Tool("dump_firmware", tier="low", produces="artifact")]),
+                           reg=reg, audit_dir=tmp_path, send=send, capture=_CaptureStub())
+    await pool.list_tools("hw")
+    ctx = _ctx(project_slug="bench-slug-abc123")
+    # Stable result object — bind it to a name so identity can be asserted
+    stable_result = _fake_result("[" * 100000)
+    async def _stub(*a, **kw): return stable_result
+    pool._inner.call_tool = _stub
+    result = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
+    # Model gets the refusal
+    assert result.isError is True
+    # Audit row is validation_failed with the expected detail
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["outcome"] == "validation_failed"
+    assert "not a JSON object" in (rows[-1].get("detail") or "")
+    # Capture received the verbatim worker result (identity preserved)
+    assert len(captured) == 1
+    _, _, captured_result = captured[0]
+    assert captured_result is stable_result
+    # ctx.artifact_descriptor stays None
+    assert ctx.artifact_descriptor is None
+
+
+@pytest.mark.asyncio
+async def test_landing_n2_ctx_none_refused_fail_closed(tmp_path):
+    """N2: with ``ctx=None`` there is no slug channel, so the dispatch must
+    refuse fail-closed naming the (absent) cwd.
+
+    Before the fix: the slug-None refusal reads ``ctx.cwd`` and crashes with
+    ``AttributeError: 'NoneType' object has no attribute 'cwd'``.
+    """
+    drive = str(uuid.uuid4())
+    spec = WorkerSpec(
+        name="hw",
+        transport="streamable_http",
+        endpoint="http://100.97.133.126:9101/mcp",
+        risk_default="low",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=drive,
+        artifact_host="100.97.133.126",
+    )
+    reg = ToolApprovalRegistry()
+    send, sent = _approval_send(reg)
+    pool = _pool_with_spec(spec, _Listing([_Tool("dump_firmware", tier="low", produces="artifact")]),
+                           reg=reg, audit_dir=tmp_path, send=send)
+    await pool.list_tools("hw")
+    # NO ctx argument — the signature is ``ctx: Any = None``
+    result = await pool.call_tool("hw", "dump_firmware", {})
+    assert result.isError is True
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["outcome"] == "validation_failed"
+    assert "project slug unavailable for None" in (rows[-1].get("detail") or "")

@@ -296,3 +296,23 @@ def test_d40b_wiring_assert_stdio_conformance_calls_helper():
         f"expected _assert_artifact_reserved_args to be called once per tool "
         f"(2 tools = 2 calls), but got {call_count[0]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Deferred-minor-19: None inputSchema fails closed (same as non-dict)
+# ---------------------------------------------------------------------------
+
+def test_none_input_schema_fails_closed():
+    """A ``None`` inputSchema is malformed, not absent — the helper must fail
+    closed the same way a non-dict schema does (an artifact tool with no
+    schema cannot expose the reserved arguments).
+
+    Before the fix the helper returned silently on ``schema is None``.
+    """
+    tool = _artifact_tool(name="dump_firmware", properties={
+        "size": {"type": "string"},
+    })
+    # Override inputSchema to None
+    tool.inputSchema = None
+    with pytest.raises(AssertionError, match="project_slug"):
+        _assert_artifact_reserved_args(tool)
