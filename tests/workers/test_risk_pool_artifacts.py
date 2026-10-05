@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 
+from agent_core.capture.layer import CaptureLayer
 from agent_core.conversation import Conversation
 from agent_core.workers.artifacts import (
     PRODUCES_ARTIFACT, PRODUCES_META_KEY,
@@ -1136,6 +1137,60 @@ async def test_landing_n1_deep_nested_json_refused_captures_and_audits(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_landing_n1b_deep_nested_json_real_capture_layer(tmp_path):
+    """N1 variant: the same deep-JSON payload, but the pool carries a REAL
+    ``CaptureLayer`` bound to a store (the production wiring) instead of a
+    stub.
+
+    Before the fix: ``CaptureLayer.maybe_substitute`` runs ``json.loads``
+    with ``except (ValueError, TypeError)`` only, so ``RecursionError``
+    escapes out of ``call_tool`` after dispatch — the model gets an
+    exception instead of a refusal, and nothing is stored. PARE binds a
+    real CaptureLayer in production, so this path is live.
+    """
+    drive = str(uuid.uuid4())
+    spec = WorkerSpec(
+        name="hw",
+        transport="streamable_http",
+        endpoint="http://100.97.133.126:9101/mcp",
+        risk_default="low",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=drive,
+        artifact_host="100.97.133.126",
+    )
+    reg = ToolApprovalRegistry()
+    send, sent = _approval_send(reg)
+    stored = []
+
+    class _FakeStore:
+        async def write(self, record):
+            stored.append(record)
+            return "cap-1"
+
+    layer = CaptureLayer(_FakeStore(), inline_budget=1024, launch_ts=0.0)
+    pool = _pool_with_spec(spec, _Listing([_Tool("dump_firmware", tier="low", produces="artifact")]),
+                           reg=reg, audit_dir=tmp_path, send=send, capture=layer)
+    await pool.list_tools("hw")
+    ctx = _ctx(project_slug="bench-slug-abc123")
+    stable_result = _fake_result("[" * 100000)
+
+    async def _stub(*a, **kw): return stable_result
+    pool._inner.call_tool = _stub
+    result = await pool.call_tool("hw", "dump_firmware", {}, ctx=ctx)
+    # The model gets the refusal, not a RecursionError
+    assert result.isError is True
+    # Audit row is validation_failed with the expected detail
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["outcome"] == "validation_failed"
+    assert "not a JSON object" in (rows[-1].get("detail") or "")
+    # The real layer stored the verbatim result (what the stub could not prove)
+    assert len(stored) == 1
+    assert stored[0].body == "[" * 100000
+    # ctx.artifact_descriptor stays None
+    assert ctx.artifact_descriptor is None
+
+
+@pytest.mark.asyncio
 async def test_landing_n2_ctx_none_refused_fail_closed(tmp_path):
     """N2: with ``ctx=None`` there is no slug channel, so the dispatch must
     refuse fail-closed naming the (absent) cwd.
@@ -1164,3 +1219,6 @@ async def test_landing_n2_ctx_none_refused_fail_closed(tmp_path):
     rows = _audit_rows(tmp_path)
     assert rows[-1]["outcome"] == "validation_failed"
     assert "project slug unavailable for None" in (rows[-1].get("detail") or "")
+    # Pre-gate: nothing dispatched, no approval prompt (same pins as D13-D17)
+    assert pool._inner.calls == []
+    assert sent == []
