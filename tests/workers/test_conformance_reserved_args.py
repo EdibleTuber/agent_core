@@ -8,6 +8,8 @@ D38: non-artifact tool with no reserved args → no raise (no-op).
 D39: non-dict _meta → fails closed, identical to sibling.
 D40: wiring — the helper is invoked by both live-suite functions.
 """
+import asyncio
+
 import pytest
 
 from agent_core.workers.artifacts import (
@@ -137,12 +139,9 @@ def test_d38b_result_tool_no_reserved_args_is_noop():
 def test_d39_non_dict_meta_fails_closed():
     """A `_meta` that is present but not a dict is malformed, not absent.
 
-    Mirrors _assert_valid_produces_meta's behaviour on this input class:
-    that function raises for all four of these shapes because
-    `meta.get(...)` only runs when `isinstance(meta, dict)`, otherwise
-    `tier` stays None and fails its own membership assertion. This function
-    must fail the same way rather than silently treating a non-dict `_meta`
-    as equivalent to a missing one.
+    Mirrors _assert_valid_produces_meta, which asserts isinstance(meta,
+    dict) directly whenever _meta is present: a non-dict _meta is
+    malformed, not absent, and this helper must fail the same way.
     """
     for bad_meta in [[], "nope", 42, True]:
         tool = _Tool("t", bad_meta, {"type": "object", "properties": {}})
@@ -156,14 +155,14 @@ def test_d39_non_dict_meta_fails_closed():
 
 def test_d40_wiring_assert_streamable_http_conformance_calls_helper():
     """assert_streamable_http_conformance must invoke
-    _assert_artifact_reserved_args for each artifact tool.
+    _assert_artifact_reserved_args for each listed tool.
 
     We monkeypatch the helper with a counting wrapper that records each
     call.  We pass a minimal fake that makes list_tools return one artifact
     tool (with both reserved args, so the helper succeeds) and one
-    non-artifact tool (also succeeds).  The counter must be called exactly
-    once — once per artifact tool."""
-    from unittest.mock import patch, MagicMock
+    non-artifact tool (also succeeds).  The helper runs once per listed
+    tool (a no-op on non-artifact ones), so two tools give two calls."""
+    from unittest.mock import patch
 
     call_count = [0]
 
@@ -212,7 +211,6 @@ def test_d40_wiring_assert_streamable_http_conformance_calls_helper():
         "agent_core.workers.conformance._assert_artifact_reserved_args",
         _counting_wrapper,
     ):
-        import asyncio
         asyncio.run(assert_streamable_http_conformance("http://localhost:9999"))
 
     assert call_count[0] == 2, (
@@ -223,13 +221,14 @@ def test_d40_wiring_assert_streamable_http_conformance_calls_helper():
 
 def test_d40b_wiring_assert_stdio_conformance_calls_helper():
     """assert_stdio_conformance must invoke
-    _assert_artifact_reserved_args for each artifact tool.
+    _assert_artifact_reserved_args for each listed tool.
 
     Same pattern as D40 but for the stdio conformance function.  We
     monkeypatch the helper and pass a minimal fake WorkerSpec whose
     transport is "stdio".  The fake client returns one artifact tool and
-    one non-artifact tool; the counter must be called exactly once."""
-    from unittest.mock import patch, MagicMock
+    one non-artifact tool; the helper runs once per listed tool (a no-op
+    on non-artifact ones), so two tools give two calls."""
+    from unittest.mock import patch
 
     call_count = [0]
 
@@ -289,7 +288,6 @@ def test_d40b_wiring_assert_stdio_conformance_calls_helper():
         "agent_core.workers.conformance._assert_artifact_reserved_args",
         _counting_wrapper,
     ):
-        import asyncio
         asyncio.run(assert_stdio_conformance(spec))
 
     assert call_count[0] == 2, (

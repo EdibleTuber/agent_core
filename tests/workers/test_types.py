@@ -214,10 +214,10 @@ def test_the_real_workers_yaml_still_loads():
 # ---------------------------------------------------------------------------
 # Task 1: WorkerSpec.artifact_host  (D1 – D11)
 # ---------------------------------------------------------------------------
-from urllib.parse import urlsplit
+
 
 _D5_DRIVE = "12345678-90ab-4cd0-8e12-34567890abcd"
-"""A valid UUID for artifact_drive_id used by D5 and D6."""
+"""A valid UUID for artifact_drive_id, shared by the Task 1 spec tests."""
 
 
 def test_d1_endpoint_defaults_artifact_host_from_url_hostname():
@@ -376,3 +376,10 @@ def test_d11_no_root_declared_host_loads_inert():
     )
     assert spec.artifact_host == "pare-bench"
     assert spec.artifact_root is None
+
+
+def test_d11b_no_root_invalid_host_refused():
+    """R9e applies without a root: a malformed host fails closed at load even while inert."""
+    with pytest.raises(ValidationError, match="artifact_host"):
+        WorkerSpec(name="bench", transport="stdio", risk_default="medium",
+                   command="frida-mcp", artifact_host="-evil")

@@ -45,7 +45,7 @@ class HandlerContext:
     cwd: str | None = None  # operator's launch cwd, stamped by the CLI; None for non-CLI clients
     project_slug: str | None = None  # supplied by the host agent — PARE stamps it per message from its
         # own project resolution; agent_core asks, never derives; None refuses artifact dispatch,
-        # naming the cwd
+        # naming the cwd — fail closed
     artifact_descriptor: dict | None = None  # set by the pool only after a successfully validated
         # artifact dispatch; the 8-field object the publisher consumes; never travels the wire
 

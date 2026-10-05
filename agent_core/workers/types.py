@@ -120,16 +120,14 @@ class WorkerSpec(BaseModel):
 
     None means the worker may not produce artifacts at all.
 
-    DECLARED, ENFORCED AT TWO OF THREE LAYERS -- read this as an intention,
-    not as current behaviour. The absolute-path validator below runs at
-    config load, and agent_core.workers.artifacts.validate_descriptor now
-    takes this object (as `spec`) and refuses a descriptor whose path is not
-    under `{artifact_root}/{slug}` -- lexically, D7's daemon-side shadow of
-    the worker's real check. What is still missing is the dispatch path that
-    routes on the produces declaration and calls the validator with this
-    spec: until it lands, a produces="artifact" dispatch against a worker
-    whose root is None is refused nowhere, and the validator's own no-root
-    refusal is defence in depth rather than the operator's experience.
+    DECLARED, ENFORCED AT ALL THREE LAYERS. The absolute-path validator
+    below runs at config load, and agent_core.workers.artifacts.
+    validate_descriptor now takes this object (as `spec`) and refuses a
+    descriptor whose path is not under `{artifact_root}/{slug}` --
+    lexically, D7's daemon-side shadow of the worker's real check. A
+    worker with no root refuses artifact dispatch pre-gate in
+    RiskAwareToolPool.call_tool (validation_failed audit row; no approval
+    prompt; no dispatch).
     """
 
     artifact_drive_id: str | None = None
@@ -138,14 +136,16 @@ class WorkerSpec(BaseModel):
     os.path.ismount() cannot tell one project's removable drive from another's,
     so writing a dump to the wrong stick would otherwise be silent.
 
-    HALF ENFORCED, like artifact_root above:
-    agent_core.workers.artifacts.validate_descriptor now COMPARES a
+    ENFORCED ON THE DAEMON SIDE.
+    agent_core.workers.artifacts.validate_descriptor COMPARES a
     descriptor's drive_id against this value and refuses a mismatch -- and
-    refuses outright when this field is None. What is still missing is the
-    dispatch path that carries this value to the validator. Note where the
-    OTHER half has to live when it is built -- the daemon cannot see the
-    worker's filesystem, so whatever reads `.bench-store-id` runs on the
-    WORKER, next to artifact_path in pare-worker-kit.
+    refuses outright when this field is None. The dispatch path carries
+    this value: RiskAwareToolPool.call_tool injects the declared drive id
+    into the tool arguments, refuses the dispatch pre-gate when the field
+    is unset, and the descriptor's drive_id is compared against it. Note
+    where the OTHER half has to live when it is built -- the daemon cannot
+    see the worker's filesystem, so whatever reads `.bench-store-id` runs
+    on the WORKER, next to artifact_path in pare-worker-kit.
     """
 
     artifact_host: str | None = None
@@ -156,8 +156,9 @@ class WorkerSpec(BaseModel):
     load against the same grammar that the daemon uses for descriptor
     validation, so a malformed value is caught early.
 
-    **Defaulting.**  When the transport is ``streamable_http`` or
-    ``http_job_api`` and ``artifact_host`` is unset, it defaults to the
+    **Defaulting.**  When ``artifact_root`` is set, the transport is
+    ``streamable_http`` or ``http_job_api``, and ``artifact_host`` is
+    unset, it defaults to the
     hostname parsed from ``endpoint`` (via ``urlsplit(endpoint).hostname``).
     The operator does not need to repeat it.
 
@@ -251,9 +252,10 @@ class WorkerSpec(BaseModel):
 
         R9 (artifact_host):
 
-        1. **Endpoint transport defaulting.**  When the transport is
-           ``streamable_http`` or ``http_job_api`` and ``artifact_host`` is
-           unset, default it to ``urlsplit(endpoint).hostname``.  If the
+        1. **Endpoint transport defaulting.**  When ``artifact_root`` is
+           set, the transport is ``streamable_http`` or ``http_job_api``,
+           and ``artifact_host`` is unset, default it to
+           ``urlsplit(endpoint).hostname``.  If the
            endpoint has no hostname (empty or absent), raise a
            ``ValidationError`` -- the operator must declare it explicitly.
 
