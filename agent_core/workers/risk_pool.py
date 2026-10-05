@@ -85,7 +85,7 @@ def _worker_error_message(result) -> str | None:
             continue
         try:
             payload = json.loads(text)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             continue
         if isinstance(payload, dict) and payload.get("error") is True:
             msg = str(payload.get("summary") or "worker error")
@@ -120,7 +120,7 @@ def _extract_descriptor(result) -> tuple[dict | None, str | None]:
         return None, f"exactly one text content block required, got {len(text_blocks)}"
     try:
         payload = json.loads(text_blocks[0].text)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return None, "not a JSON object"
     if not isinstance(payload, dict):
         return None, "not a JSON object"
@@ -444,57 +444,34 @@ class RiskAwareToolPool:
         if produces == PRODUCES_ARTIFACT:
             spec = self.spec_for(worker)
             slug = getattr(ctx, "project_slug", None)
-            # --- four pre-gate refusals ---
+            cwd = getattr(ctx, "cwd", None)
+            # --- five pre-gate refusals ---
             if not getattr(spec, "artifact_root", None):
-                self._emit(worker, tool, snapshot, declared, declared, 0,
-                           "validation_failed", None,
-                           f"{spec.name}: artifact_root is not declared; "
-                           f"set artifact_root in workers.yaml to enable "
-                           f"artifact dispatch for this worker")
-                return _ErrorResult(
+                return self._refuse(worker, tool, snapshot, declared,
                     f"{spec.name}: artifact_root is not declared; "
                     f"set artifact_root in workers.yaml to enable "
-                    f"artifact dispatch for this worker")
+                    f"artifact dispatch for this worker", tier_source)
             if not getattr(spec, "artifact_drive_id", None):
-                self._emit(worker, tool, snapshot, declared, declared, 0,
-                           "validation_failed", None,
-                           f"{spec.name}: artifact_root is set but "
-                           f"artifact_drive_id is not declared; "
-                           f"set artifact_drive_id in workers.yaml to "
-                           f"enable artifact dispatch for this worker")
-                return _ErrorResult(
+                return self._refuse(worker, tool, snapshot, declared,
                     f"{spec.name}: artifact_root is set but "
                     f"artifact_drive_id is not declared; "
                     f"set artifact_drive_id in workers.yaml to "
-                    f"enable artifact dispatch for this worker")
+                    f"enable artifact dispatch for this worker", tier_source)
             if not getattr(spec, "artifact_host", None):
-                self._emit(worker, tool, snapshot, declared, declared, 0,
-                           "validation_failed", None,
-                           f"{spec.name}: artifact_host is not declared; "
-                           f"set artifact_host in workers.yaml to "
-                           f"enable artifact dispatch for this worker")
-                return _ErrorResult(
+                return self._refuse(worker, tool, snapshot, declared,
                     f"{spec.name}: artifact_host is not declared; "
                     f"set artifact_host in workers.yaml to "
-                    f"enable artifact dispatch for this worker")
+                    f"enable artifact dispatch for this worker", tier_source)
             if slug is None:
-                self._emit(worker, tool, snapshot, declared, declared, 0,
-                           "validation_failed", None,
-                           f"project slug unavailable for {ctx.cwd}; "
-                           f"artifact dispatch requires a project slug")
-                return _ErrorResult(
-                    f"project slug unavailable for {ctx.cwd}; "
-                    f"artifact dispatch requires a project slug")
+                return self._refuse(worker, tool, snapshot, declared,
+                    f"project slug unavailable for {cwd}; "
+                    f"artifact dispatch requires a project slug", tier_source)
             try:
                 validate_slug(slug)
             except ValueError:
-                self._emit(worker, tool, snapshot, declared, declared, 0,
-                           "validation_failed", None,
-                           f"invalid project slug for {ctx.cwd}; "
-                           f"artifact dispatch requires a valid project slug")
-                return _ErrorResult(
-                    f"invalid project slug for {ctx.cwd}; "
-                    f"artifact dispatch requires a valid project slug")
+                return self._refuse(worker, tool, snapshot, declared,
+                    f"invalid project slug for {cwd}; "
+                    f"artifact dispatch requires a valid project slug", tier_source)
             # --- Task 3: inject slug and drive_id into arguments ---
             arguments[RESERVED_SLUG_ARG] = slug
             arguments[RESERVED_DRIVE_ID_ARG] = spec.artifact_drive_id
@@ -694,6 +671,21 @@ class RiskAwareToolPool:
         self._emit(worker, tool, snapshot, declared, effective, latency, outcome, gate_override, detail,
                    tier_source)
         return (result, refusal) if refusal is not None else result
+
+    def _refuse(self, worker, tool, snapshot, declared, detail, tier_source):
+        """Emit a validation_failed audit row and return the model-facing refusal.
+
+        Used for all five pre-gate artifact refusals (artifact_root-None,
+        artifact_drive_id-None, artifact_host-None, slug-None, slug-invalid).
+        Pre-gate means effective tier is the declared tier, latency is zero,
+        and there is no override reason. The row carries the tier provenance
+        ``tier_source`` as computed by ``_resolve_declared`` — pre-gate rows
+        previously recorded ``tier_source`` as ``None`` because the argument
+        was omitted.
+        """
+        self._emit(worker, tool, snapshot, declared, declared, 0,
+                   "validation_failed", None, detail, tier_source)
+        return _ErrorResult(detail)
 
     def _emit(self, worker, tool, snapshot, declared, effective, latency_ms, outcome, override_reason, detail,
               tier_source=None):
