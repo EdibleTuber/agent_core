@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.12.1] - 2026-10-15
+
+`RiskAwareToolPool` now audits the hardware worker's in-band error surface.
+`_worker_error_message` recognized only the house `{"summary", "error": true}`
+envelope; the hardware worker (pare-hardware-mcp) reports failures as a bare
+`{"error": "<message>"}` object with `isError=False`. On a `produces=artifact`
+tool such a result fell through to descriptor validation and was refused as
+`validation_failed` ("descriptor is missing 'host'"), so the kit's named
+diagnostics (sentinel mismatch, read-only drive, ENOSPC, collision) never
+reached the model or the audit log — the exact failure the console-capture
+artifact spec (§3, 2026-10-01-console-capture-artifact-design.md:70-80)
+forbids.
+
+### Fixed
+- **`_worker_error_message` (workers/risk_pool.py)** — also recognizes a bare
+  error object: a non-empty string `error` value with no `summary` key is
+  returned (truncated to 500 chars, same as the envelope path) as the audit
+  detail. A payload carrying a `summary` is left alone: such a worker has
+  already made its own ok/error call through the `error is true` convention
+  (e.g. frida's `execute_script` carries a script failure as result data
+  under a successful `_ok` envelope).
+- Net effect on a `produces=artifact` tool: the worker's error object now
+  reaches the model verbatim, `ctx.artifact_descriptor` stays unset, and the
+  audit row is `error` with the worker's own message — never
+  `validation_failed`.
+- D41 (tests/workers/test_risk_pool_artifacts.py) pins the spec §3 mandate:
+  a `produces=artifact` tool returning `{"error": "…"}` surfaces `…` intact.
+
+### Notes
+- For RESULT tools the change is audit-only: a bare string error object now
+  audits as `error` instead of `ok` (no such wire surface exists in the
+  current fleet; the model-visible result is unchanged).
+
 ## [1.11.1] - 2026-10-01
 
 `/help` renders as an aligned two-column table: the command column
