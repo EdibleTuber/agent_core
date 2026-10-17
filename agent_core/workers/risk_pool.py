@@ -72,12 +72,30 @@ class _ErrorResult:
 
 def _worker_error_message(result) -> str | None:
     """Return the worker's error message when the result carries an in-band
-    ``{"error": true}`` envelope, else None.
+    error envelope, else None.
 
     Internal workers report failures by returning normally with an error
-    envelope rather than raising, so ``isError`` stays False. This surfaces that
-    envelope for honest auditing. Defensive against non-JSON / non-envelope
-    content: anything unparseable yields None (treated as success).
+    envelope rather than raising, so ``isError`` stays False. This surfaces
+    that envelope for honest auditing. Two shapes are recognized:
+
+    - the house envelope ``{"summary": ..., "error": true, "detail"?}`` used
+      by the frida/static/mitm workers;
+    - a bare error object ``{"error": "<message>"}`` with NO ``summary`` key —
+      the hardware worker's wire surface (pare-hardware-mcp ``_err``). The
+      console-capture-artifact spec (§3) requires a ``produces=artifact``
+      tool's named failures to reach the model verbatim and audit as errors,
+      never as malformed descriptors; its diagnostic messages ARE the
+      error text, so the whole value is carried (truncated like the
+      envelope path).
+
+    A payload that DOES carry a ``summary`` has already made its own ok/error
+    call through the ``error is true`` convention, so a string-valued
+    ``error`` in such a payload is result data, not a failure signal (e.g.
+    frida's ``execute_script`` reports a script failure while the dispatch
+    itself succeeded and returned the sends/logs).
+
+    Defensive against non-JSON / non-envelope content: anything unparseable
+    yields None (treated as success).
     """
     for block in getattr(result, "content", None) or []:
         text = getattr(block, "text", None)
@@ -87,12 +105,17 @@ def _worker_error_message(result) -> str | None:
             payload = json.loads(text)
         except (ValueError, TypeError, RecursionError):
             continue
-        if isinstance(payload, dict) and payload.get("error") is True:
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("error") is True:
             msg = str(payload.get("summary") or "worker error")
             detail = payload.get("detail")
             if detail:
                 msg = f"{msg}: {detail}"
             return msg[:500]
+        err = payload.get("error")
+        if isinstance(err, str) and err and "summary" not in payload:
+            return err[:500]
     return None
 
 
@@ -623,10 +646,12 @@ class RiskAwareToolPool:
                        tier_source)
             return _ErrorResult(f"{worker}.{tool} call failed: {exc}")
         latency = int((time.monotonic() - start) * 1000)
-        # Internal workers signal failure with an in-band {"error": true} envelope
-        # while returning normally (FastMCP only sets isError on a raise), so the
-        # protocol flag alone would record these as "ok". Honour both, and carry
-        # the worker's own message into the audit detail.
+        # Internal workers signal failure with an in-band error envelope while
+        # returning normally (FastMCP only sets isError on a raise), so the
+        # protocol flag alone would record these as "ok". Honour both: the
+        # house {"error": true} envelope and the hardware worker's bare
+        # {"error": "..."} object (see _worker_error_message), and carry the
+        # worker's own message into the audit detail.
         worker_err = _worker_error_message(result)
         is_error = bool(getattr(result, "isError", False)) or worker_err is not None
         if is_error:

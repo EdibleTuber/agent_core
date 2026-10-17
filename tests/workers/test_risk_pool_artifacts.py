@@ -1222,3 +1222,68 @@ async def test_landing_n2_ctx_none_refused_fail_closed(tmp_path):
     # Pre-gate: nothing dispatched, no approval prompt (same pins as D13-D17)
     assert pool._inner.calls == []
     assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# D41 (spec §3, 2026-10-01-console-capture-artifact-design.md:70-80)
+# bare string error object on an artifact tool
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_d41_string_error_object_artifact_verbatim_error_audit(tmp_path):
+    """D41: a produces=artifact tool returning the hardware worker's bare
+    ``{"error": "<msg>"}`` object (isError=False — the wire surface at
+    pare-hardware-mcp tools.py ``_err``) must pass the RAW result to the model
+    verbatim, audit as ``error`` with the worker's own message, and never
+    attempt descriptor validation.
+
+    Before the fix: the probe (``_worker_error_message``) recognized only the
+    house boolean envelope, so this surface fell through to descriptor
+    validation and was refused as ``validation_failed`` with
+    "descriptor is missing 'host'" — the worker's named error (spec §5.7:
+    the kit's message IS the diagnostic) never reached the model or the audit.
+    """
+    drive = str(uuid.uuid4())
+    spec = WorkerSpec(
+        name="hw",
+        transport="streamable_http",
+        endpoint="http://100.97.133.126:9101/mcp",
+        risk_default="low",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=drive,
+        artifact_host="100.97.133.126",
+    )
+    reg = ToolApprovalRegistry()
+    send, sent = _approval_send(reg)
+    captured = []
+    class _CaptureStub:
+        async def maybe_substitute(self, worker, tool, result, substitute=True, session_id=None):
+            captured.append((worker, tool, result))
+            return result
+    pool = _pool_with_spec(spec, _Listing([_Tool("console_capture", tier="low", produces="artifact")]),
+                           reg=reg, audit_dir=tmp_path, send=send, capture=_CaptureStub())
+    await pool.list_tools("hw")
+    ctx = _ctx(project_slug="bench-slug-abc123")
+    msg = ("the artifact root is read-only: creating 'wbench-test+partial' failed (EROFS); "
+           "ext4 remounts read-only when it detects an error, so check the drive")
+    raw_text = json.dumps({"error": msg})
+    stable_result = _fake_result(raw_text)
+    async def _stub(*a, **kw): return stable_result
+    pool._inner.call_tool = _stub
+    result = await pool.call_tool("hw", "console_capture",
+                                  {"session": "s1", "name": "wbench-test"}, ctx=ctx)
+    # Verbatim pass-through: the model sees the worker's own error object,
+    # not a daemon refusal
+    assert result is stable_result
+    assert result.isError is False
+    assert result.content[0].text == raw_text
+    # No validation attempted (error objects have no descriptor fields)
+    assert ctx.artifact_descriptor is None
+    # Capture received the verbatim worker result
+    assert len(captured) == 1
+    assert captured[0][2] is stable_result
+    # Audit: 'error' with the worker's own message — never validation_failed
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["outcome"] == "error"
+    assert msg in (rows[-1].get("detail") or "")
+    assert all(r["outcome"] != "validation_failed" for r in rows)
