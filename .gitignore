@@ -17,3 +17,6 @@ dist/
 # Working state, never committed.
 .superpowers/
 .claude/worktrees/
+
+# Serena (per-project LSP config, memories, cache)
+.serena/
