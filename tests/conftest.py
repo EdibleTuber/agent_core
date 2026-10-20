@@ -272,13 +272,51 @@ async def mock_list_models(request: Request):
     })
 
 
+# Drives the /swap + /status mocks. Tests mutate this to exercise the async
+# (202 -> poll) path and rejections; the autouse reset fixture restores defaults.
+#   mode: "sync-ok"  -> POST /swap returns 200 (already loaded)
+#         "async"    -> POST /swap returns 202, then /status reports swapping
+#                       for `polls_until_done` polls, then `final_healthy`
+#         "reject"   -> POST /swap returns `reject_status` + error envelope
+SWAP_STATE: dict = {}
+
+
+def _reset_swap_state() -> None:
+    SWAP_STATE.clear()
+    SWAP_STATE.update(
+        mode="sync-ok",
+        target="main",
+        model=None,
+        polls_remaining=0,
+        final_healthy=True,
+        reject_status=404,
+    )
+
+
+_reset_swap_state()
+
+
 async def mock_manager_status(request: Request):
     """Mock GET /status (llama-manager slot state)."""
+    slots = {
+        "main": {"loaded_model": "test-model", "healthy": True, "swapping": False},
+        "batch": {
+            "loaded_model": "gemma-4-E4B-it-Q4_K_M", "healthy": True, "swapping": False},
+    }
+    if SWAP_STATE["mode"] == "async" and SWAP_STATE["model"] is not None:
+        target = SWAP_STATE["target"]
+        if SWAP_STATE["polls_remaining"] > 0:
+            SWAP_STATE["polls_remaining"] -= 1
+            slots[target] = {
+                "loaded_model": "test-model", "healthy": False, "swapping": True}
+        elif SWAP_STATE["final_healthy"]:
+            slots[target] = {
+                "loaded_model": SWAP_STATE["model"], "healthy": True, "swapping": False}
+        else:
+            slots[target] = {
+                "loaded_model": None, "healthy": False, "swapping": False}
     return JSONResponse({
-        "slots": {
-            "main": {"loaded_model": "test-model", "healthy": True},
-            "batch": {"loaded_model": "gemma-4-E4B-it-Q4_K_M", "healthy": True},
-        },
+        "slots": slots,
         "gpu": {"name": "mock", "vram_total_mb": 24000, "vram_used_mb": 12000},
     })
 
@@ -286,6 +324,20 @@ async def mock_manager_status(request: Request):
 async def mock_manager_swap(request: Request):
     """Mock POST /swap (llama-manager model swap)."""
     body = await request.json()
+    if SWAP_STATE["mode"] == "reject":
+        return JSONResponse(
+            {"error": {"type": "model_not_found",
+                       "message": f"Model file not found: {body.get('model')}"}},
+            status_code=SWAP_STATE["reject_status"],
+        )
+    if SWAP_STATE["mode"] == "async":
+        SWAP_STATE["target"] = body.get("target", "main")
+        SWAP_STATE["model"] = body.get("model")
+        return JSONResponse(
+            {"slot": body.get("target", "main"),
+             "model": body.get("model"), "status": "swapping"},
+            status_code=202,
+        )
     return JSONResponse({
         "slot": body.get("target", "main"),
         "model": body.get("model"),
@@ -408,4 +460,5 @@ async def mock_inference_server() -> AsyncGenerator[str, None]:
 def _clear_request_log():
     """Clear REQUEST_LOG before each test to prevent cross-test leakage."""
     REQUEST_LOG.clear()
+    _reset_swap_state()
     yield
