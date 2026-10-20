@@ -267,6 +267,30 @@ class Rate(Command):
         yield ResponseMessage(text=f"Rating recorded: {rating}" + (f" — {comment}" if comment else ""))
 
 
+# POST /swap returns 202 and runs the swap in the background; the command then
+# polls GET /status until the slot stops swapping. Interval and overall budget
+# are module-level so tests can shrink them. The budget must exceed the
+# manager's own SWAP_TIMEOUT so a slow cold load isn't cut short client-side.
+_SWAP_POLL_INTERVAL = 3.0
+_SWAP_POLL_TIMEOUT = 660.0
+
+
+def _swap_error_detail(resp) -> str:
+    """Pull a human-readable reason out of the manager's error response.
+
+    The manager rejects a swap with {"error": {"type", "message"}}; fall back
+    to the raw body (truncated) if it isn't shaped that way.
+    """
+    try:
+        err = resp.json().get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return f"HTTP {resp.status_code}: {err['message']}"
+    except Exception:
+        pass
+    body = (resp.text or "").strip()
+    return f"HTTP {resp.status_code}: {body[:200]}" if body else f"HTTP {resp.status_code}"
+
+
 class Model(Command):
     name = "model"
     args = "[list | default | [--target main|batch] <name>]"
@@ -295,7 +319,10 @@ class Model(Command):
             for slot_name in ("main", "batch"):
                 s = slots.get(slot_name)
                 if s is not None:
-                    health = "healthy" if s.get("healthy") else "UNHEALTHY"
+                    if s.get("swapping"):
+                        health = "swapping…"
+                    else:
+                        health = "healthy" if s.get("healthy") else "UNHEALTHY"
                     lines.append(f"  {slot_name}: {s.get('loaded_model', '?')} ({health})")
             lines.append(f"session sends: {inf.default_model}")
             yield ResponseMessage(text="\n".join(lines), command="model")
@@ -352,25 +379,84 @@ class Model(Command):
         else:
             name = arg
 
-        # Load it on the manager (POST /swap). A cold swap restarts llama-server,
-        # so allow the manager's swap timeout to elapse.
+        # Kick off the swap. The manager answers fast now: 200 if the model is
+        # already loaded and healthy, 202 if it started a background swap that we
+        # then poll to completion via GET /status. A cold swap can take a while
+        # (llama-server restart), but that wait lives in the poll loop below, not
+        # in this request -- so the POST itself gets a short timeout.
+        import asyncio
+        import time
+
         try:
-            async with httpx.AsyncClient(timeout=180.0) as client:
-                resp = await client.post(f"{base}/swap", json={"model": name, "target": target})
-                resp.raise_for_status()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{base}/swap", json={"model": name, "target": target})
         except Exception as exc:
-            yield ErrorMessage(error=f"Swap failed ({target} -> {name}): {exc}")
+            yield ErrorMessage(
+                error=f"Swap request failed ({target} -> {name}): "
+                      f"{type(exc).__name__}: {exc}")
             return
 
-        # Repoint the session so the NEXT turn uses the model we just loaded.
-        # The local-only builtin never did this, and PAL's override swaps without
-        # repointing — doing both here is what makes /model a one-step switch.
-        if target == "main":
-            inf.default_model = name
+        if resp.status_code == 200:
+            # Already loaded and healthy -- nothing to wait on.
+            if target == "main":
+                inf.default_model = name
+            yield ResponseMessage(
+                text=f"model: {target} -> {name} (already loaded; session repointed)",
+                command="model")
+            return
+
+        if resp.status_code != 202:
+            # The manager rejects with a JSON error envelope (400/404/503).
+            detail = _swap_error_detail(resp)
+            yield ErrorMessage(error=f"Swap failed ({target} -> {name}): {detail}")
+            return
+
+        # 202 Accepted: the swap is running in the background. Poll /status until
+        # the slot stops swapping, then let its health decide success/failure.
         yield ResponseMessage(
-            text=f"model: {target} -> {name} (loaded on manager + session repointed)",
-            command="model",
-        )
+            text=f"model: swapping {target} -> {name} (loading on manager, polling…)",
+            command="model")
+
+        deadline = time.monotonic() + _SWAP_POLL_TIMEOUT
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                while True:
+                    await asyncio.sleep(_SWAP_POLL_INTERVAL)
+                    if time.monotonic() > deadline:
+                        yield ErrorMessage(
+                            error=f"Swap timed out after {int(_SWAP_POLL_TIMEOUT)}s "
+                                  f"waiting for {target} -> {name}")
+                        return
+                    sresp = await client.get(f"{base}/status")
+                    sresp.raise_for_status()
+                    slot = sresp.json().get("slots", {}).get(target) or {}
+                    if slot.get("swapping"):
+                        continue
+                    # Not swapping any more. Success only once the slot is healthy
+                    # AND actually serving the model we asked for -- which also
+                    # guards the brief window before the manager takes swap_lock,
+                    # where /status may still show the OLD model as healthy.
+                    if slot.get("healthy") and slot.get("loaded_model") == name:
+                        if target == "main":
+                            inf.default_model = name
+                        yield ResponseMessage(
+                            text=f"model: {target} -> {name} "
+                                 "(loaded on manager + session repointed)",
+                            command="model")
+                        return
+                    if not slot.get("healthy"):
+                        yield ErrorMessage(
+                            error=f"Swap failed ({target} -> {name}): slot reports "
+                                  "unhealthy after swap")
+                        return
+                    # Healthy, not swapping, but not yet the requested model: the
+                    # background swap hasn't taken the lock; keep polling.
+        except Exception as exc:
+            yield ErrorMessage(
+                error=f"Swap polling failed ({target} -> {name}): "
+                      f"{type(exc).__name__}: {exc}")
+            return
 
 
 class Think(Command):
