@@ -1287,3 +1287,94 @@ async def test_d41_string_error_object_artifact_verbatim_error_audit(tmp_path):
     assert rows[-1]["outcome"] == "error"
     assert msg in (rows[-1].get("detail") or "")
     assert all(r["outcome"] != "validation_failed" for r in rows)
+
+
+# frida-shape success payload: {"summary": ..., "error": "<str>"} is NOT a
+# worker error — the "summary" not in payload guard (risk_pool.py:117) and the
+# err truthiness
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_string_error_with_summary_is_a_success_passed_through(tmp_path):
+    """A frida-style result payload carrying BOTH ``summary`` and a string
+    ``error`` (isError=False — script diagnostics, not failure) must pass the
+    RAW result to the model and audit ``ok``.
+
+    Pins the ``"summary" not in payload`` guard in
+    ``_worker_error_message`` (risk_pool.py:117): without it, the string
+    branch fires and a healthy run is audited ``error`` with the script's own
+    stderr. The falsy half (``{"error": ""}``) pins the ``and err``
+    truthiness: ``""`` is not an error, and the audit's ``is not None`` check
+    would otherwise turn it into one.
+    """
+    drive = str(uuid.uuid4())
+    spec = WorkerSpec(
+        name="frida",
+        transport="streamable_http",
+        endpoint="http://100.97.133.126:9101/mcp",
+        risk_default="low",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=drive,
+        artifact_host="100.97.133.126",
+    )
+    reg = ToolApprovalRegistry()
+    send, sent = _approval_send(reg)
+    pool = _pool_with_spec(spec, _Listing([_Tool("execute_script", tier="low", produces="result")]),
+                           reg=reg, audit_dir=tmp_path, send=send)
+    await pool.list_tools("frida")
+    ctx = _ctx(project_slug="bench-slug-abc123")
+    raw_text = json.dumps({"summary": "script finished",
+                           "error": "Traceback (most recent call last): KeyError('x')"})
+    stable_result = _fake_result(raw_text)
+    async def _stub(*a, **kw): return stable_result
+    pool._inner.call_tool = _stub
+    result = await pool.call_tool("frida", "execute_script", {}, ctx=ctx)
+    assert result is stable_result          # raw pass-through
+    assert result.isError is False
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["outcome"] == "ok"
+    # Falsy half: an empty-string error is not an error either.
+    raw2 = json.dumps({"summary": "ok", "error": ""})
+    stable2 = _fake_result(raw2)
+    async def _stub2(*a, **kw): return stable2
+    pool._inner.call_tool = _stub2
+    result2 = await pool.call_tool("frida", "execute_script", {}, ctx=ctx)
+    assert result2 is stable2
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["outcome"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_string_error_audit_detail_is_truncated_to_500_chars(tmp_path):
+    """``err[:500]`` (risk_pool.py:118) was never exercised beyond the no-op:
+    a >500-char string error must land in the audit detail at exactly 500
+    chars — the bound that keeps one runaway worker message from bloating
+    every audit row.
+    """
+    drive = str(uuid.uuid4())
+    spec = WorkerSpec(
+        name="hw",
+        transport="streamable_http",
+        endpoint="http://100.97.133.126:9101/mcp",
+        risk_default="low",
+        artifact_root="/mnt/bench-store",
+        artifact_drive_id=drive,
+        artifact_host="100.97.133.126",
+    )
+    reg = ToolApprovalRegistry()
+    send, sent = _approval_send(reg)
+    pool = _pool_with_spec(spec, _Listing([_Tool("console_capture", tier="low", produces="artifact")]),
+                           reg=reg, audit_dir=tmp_path, send=send)
+    await pool.list_tools("hw")
+    ctx = _ctx(project_slug="bench-slug-abc123")
+    long_msg = "E" * 501
+    stable_result = _fake_result(json.dumps({"error": long_msg}))
+    async def _stub(*a, **kw): return stable_result
+    pool._inner.call_tool = _stub
+    result = await pool.call_tool("hw", "console_capture",
+                                  {"session": "s1", "name": "wbench-test"}, ctx=ctx)
+    assert result is stable_result
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["outcome"] == "error"
+    assert rows[-1]["detail"] == "E" * 500
+    assert len(rows[-1]["detail"]) == 500
