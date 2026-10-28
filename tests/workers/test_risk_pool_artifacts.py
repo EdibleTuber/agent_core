@@ -1333,8 +1333,10 @@ async def test_string_error_with_summary_is_a_success_passed_through(tmp_path):
     assert result.isError is False
     rows = _audit_rows(tmp_path)
     assert rows[-1]["outcome"] == "ok"
-    # Falsy half: an empty-string error is not an error either.
-    raw2 = json.dumps({"summary": "ok", "error": ""})
+    # Falsy half: NO "summary" key, so the string branch actually runs; an
+    # empty-string error must stay a success (pins the and err truthiness:
+    # the audit's is not None check would turn "" into an error otherwise).
+    raw2 = json.dumps({"error": ""})
     stable2 = _fake_result(raw2)
     async def _stub2(*a, **kw): return stable2
     pool._inner.call_tool = _stub2
