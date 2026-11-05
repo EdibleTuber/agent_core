@@ -1,5 +1,50 @@
 # Changelog
 
+## [1.13.0] - 2026-11-05
+
+`/model` now speaks the manager's phase-5 contract, the inference client no
+longer auto-swaps on a 409, and the manager's bearer token rides every manager
+call.
+
+### Changed
+- **The builtin `/model` (commands/_builtin_impls.py)** — `/model` with no
+  argument shows one line per slot, in the order `/status` reports them (any
+  slot name; nothing names `main` or `batch`), as
+  `<slot>: <loaded model or "none"> (<state>)`, ending with
+  `session sends: <model>`; an endpoint without a reachable `/status` still
+  falls back to the pointer line. A swap posts `{"model": name}` to `/swap`
+  (plus `"target"` only when `--target <slot>` is given — slot names are the
+  manager's to check, and its 400 `invalid_target` message is shown as is),
+  carrying a fresh `X-Request-Id` (uuid4 hex) on every attempt. A 200 is
+  reported as already loaded at once; a 202 means queued: the command then
+  yields a `ToolProgressMessage` — never an interim `ResponseMessage`, since
+  every reader stops at the first `ResponseMessage` and would leave the real
+  outcome in the socket — and polls `/status` every 2 s until the slot the
+  202 named has a `last_swap` whose `id` is this request's id (older entries
+  and failed polls do not end the wait). `ok`/`already_loaded` is a success;
+  `fell_back`/`failed` is an error carrying the manager's message; at the
+  1500 s cap the command says the swap is still running and that `/model`
+  shows its state. The session is no longer repointed after a `main` swap —
+  a swap changes what a slot holds for every client, and which model this
+  agent sends stays its configuration's business — so every swap report ends
+  with the pointer. `list` and `default` are unchanged apart from the token.
+- **`InferenceClient` no longer auto-swaps on 409 (inference.py)** — a 409 is
+  handled like every other 4xx: the first response's `raise_for_status()`
+  raises on both `complete` and `stream`, and no retry follows. Removing the
+  automatic `POST /swap` also deletes the latent bug that counted only a 200
+  as a successful swap even though the manager answers 202. The 503 and
+  connection-drop retries are unchanged.
+- **The manager's token (config.py, inference.py, retrieval.py, runtime.py)**
+  — `BaseConfig.manager_token`, read from `<PREFIX>MANAGER_TOKEN` (an empty or
+  whitespace-only value means no token; the manager's own `MANAGER_TOKEN` is
+  not read), is set as the default `Authorization: Bearer <token>` header on
+  the inference and retrieval clients, so every request — including retries —
+  carries it. `InferenceClient.token` exposes it as a read-only property. The
+  token goes only to the manager: SearXNG and the URL fetcher never send it,
+  and it stays out of config reprs.
+- `inference_url` and `batch_inference_url` default to
+  `http://127.0.0.1:11434` (the manager's loopback port).
+
 ## [1.12.1] - 2026-10-15
 
 `RiskAwareToolPool` now audits the hardware worker's in-band error surface.
