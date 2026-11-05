@@ -224,6 +224,10 @@ async def test_the_slot_polled_is_the_one_the_202_names(monkeypatch, fast):
     final = _final(msgs)
     assert isinstance(final, ResponseMessage), _text(final)
     assert "spare" in final.text
+    # The swap landed: read on the first poll of 'spare', not waited out to
+    # the cap (which also names the slot, and is also a ResponseMessage).
+    assert "still running" not in final.text
+    assert manager.polls_after_swap == 1
 
 
 async def test_a_202_yields_progress_not_an_interim_response(monkeypatch, fast):
@@ -275,7 +279,10 @@ async def test_a_swap_still_running_at_the_cap_says_so(monkeypatch, fast):
     manager = FakeManager(never=True)
     _, msgs = await _run(monkeypatch, manager, "gemma-4")
     final = _final(msgs)
-    text = _text(final)
+    # A swap still running is not a failure: the plan makes the cap a
+    # ResponseMessage, like success.
+    assert isinstance(final, ResponseMessage), _text(final)
+    text = final.text
     assert "still running" in text
     assert "/model" in text
     assert manager.polls_after_swap >= 2
