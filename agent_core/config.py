@@ -27,7 +27,7 @@ class BaseConfig:
     `<PREFIX><FIELD_NAME_UPPER>`, where the prefix is derived from the agent
     name unless explicitly overridden.
     """
-    inference_url: str = "http://192.168.1.14:11434"
+    inference_url: str = "http://127.0.0.1:11434"
     model: str = "Qwen3.5-35B-A3B-Q4_K_M"
     socket_path: Path | None = None
     history_depth: int = 50
@@ -40,10 +40,11 @@ class BaseConfig:
     fetch_timeout: int = 30
     max_response_tokens: int = 4096
     batch_enabled: bool = False
-    batch_inference_url: str = "http://192.168.1.14:11434"
+    batch_inference_url: str = "http://127.0.0.1:11434"
     batch_model: str = "Qwen3.5-35B-A3B-Q4_K_M"
     scratchpad_max_bytes: int = 2048
     project_marker: str | None = None
+    manager_token: str | None = field(default=None, repr=False)
 
 
 def _coerce(field_type, raw: str):
@@ -94,6 +95,11 @@ def load_config(
         if env_name not in os.environ:
             continue
         raw = os.environ[env_name]
+        if f.name == "manager_token" and not raw.strip():
+            # An empty or whitespace-only token means "no token": it would
+            # otherwise send `Authorization: Bearer ` and be refused.
+            kwargs[f.name] = None
+            continue
         field_type = type_hints.get(f.name, str)
         try:
             kwargs[f.name] = _coerce(field_type, raw)

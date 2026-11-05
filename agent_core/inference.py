@@ -104,11 +104,26 @@ def _parse_usage(data: dict, fallback_model: str | None = None) -> Usage | None:
 
 
 class InferenceClient:
-    def __init__(self, base_url: str, model: str, is_batch: bool = False) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        is_batch: bool = False,
+        token: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.default_model = model
         self.is_batch = is_batch
-        self._client = httpx.AsyncClient(timeout=600.0)
+        self._token = token
+        # The manager refuses requests without its token, so it goes on
+        # every request this client sends, including retries.
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self._client = httpx.AsyncClient(timeout=600.0, headers=headers)
+
+    @property
+    def token(self) -> str | None:
+        """The manager's bearer token, or None. Read-only."""
+        return self._token
 
     async def close(self) -> None:
         await self._client.aclose()
