@@ -386,15 +386,7 @@ async def test_rate_no_args():
 # ---------------------------------------------------------------------------
 # /model
 # ---------------------------------------------------------------------------
-
-async def test_model_show_reports_loaded_slots(mock_inference_server):
-    # No arg -> GET /status -> report each slot's loaded model + session pointer.
-    inf = MagicMock(default_model="test-model", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("", _ctx(agent)))
-    body = _body(msgs)
-    assert "main:" in body
-    assert "session sends: test-model" in body
+# The swap and status tests are in tests/test_model_command.py.
 
 
 async def test_model_show_falls_back_without_status():
@@ -405,22 +397,6 @@ async def test_model_show_falls_back_without_status():
     assert "model-a" in _body(msgs)
 
 
-async def test_model_switch_swaps_and_repoints(mock_inference_server):
-    # <name> -> POST /swap succeeds -> session repointed to the loaded model.
-    inf = MagicMock(default_model="old-model", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("new-model-x", _ctx(agent)))
-    assert inf.default_model == "new-model-x"          # repointed
-    assert "new-model-x" in _body(msgs)
-
-
-async def test_model_switch_target_batch_does_not_repoint_main(mock_inference_server):
-    # --target batch swaps the batch slot; the main session pointer is untouched.
-    inf = MagicMock(default_model="main-model", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("--target batch batch-model", _ctx(agent)))
-    assert inf.default_model == "main-model"           # main pointer unchanged
-    assert "batch" in _body(msgs)
 
 
 async def test_model_list(mock_inference_server):
