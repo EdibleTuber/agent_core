@@ -338,3 +338,38 @@ async def test_no_token_sends_no_authorization_header(monkeypatch, fast):
     await _run(monkeypatch, manager, "gemma-4")
     assert manager.requests
     assert all("authorization" not in r.headers for r in manager.requests)
+
+
+# --- a failed call names what went wrong --------------------------------------
+# An httpx timeout stringifies to '' (str(httpx.ReadTimeout("")) == ""), so a
+# message built from {exc} alone read "Swap failed (gemma-4): " -- blank. Main
+# fixed this in c7a037a, whose /model this branch replaced; the fix returns
+# here (phase 6, Task 3 review).
+
+class _Raising(FakeManager):
+    """Raises `exc` for requests to `path`; answers everything else."""
+
+    def __init__(self, path, exc, **kwargs):
+        super().__init__(**kwargs)
+        self.raise_path, self.exc = path, exc
+
+    def __call__(self, request):
+        if request.url.path == self.raise_path:
+            self.requests.append(request)
+            raise self.exc
+        return super().__call__(request)
+
+
+@pytest.mark.parametrize("args,path", [("list", "/v1/models"), ("gemma-4", "/swap")],
+                         ids=["list", "swap"])
+@pytest.mark.parametrize("exc,shown", [
+    (httpx.ReadTimeout(""), "ReadTimeout"),
+    (httpx.ConnectError("All connection attempts failed"),
+     "All connection attempts failed"),
+], ids=["blank-timeout", "with-message"])
+async def test_a_failed_call_says_what_went_wrong(monkeypatch, fast, args, path,
+                                                  exc, shown):
+    _, msgs = await _run(monkeypatch, _Raising(path, exc), args)
+    final = _final(msgs)
+    assert isinstance(final, ErrorMessage)
+    assert shown in final.error
