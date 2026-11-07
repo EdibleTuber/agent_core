@@ -348,7 +348,9 @@ class Model(Command):
                     resp.raise_for_status()
                 names = [m["id"] for m in resp.json().get("data", [])]
             except Exception as exc:
-                yield ErrorMessage(error=f"Could not reach inference manager: {exc}")
+                yield ErrorMessage(
+                    error=f"Could not reach inference manager: "
+                          f"{type(exc).__name__}: {exc}")
                 return
             if not names:
                 yield ResponseMessage(text="No models available.", command="model")
@@ -407,7 +409,7 @@ class Model(Command):
                                          headers={"X-Request-Id": request_id})
             except Exception as exc:
                 yield ErrorMessage(
-                    error=f"Swap failed ({name}): {exc}\n"
+                    error=f"Swap failed ({name}): {type(exc).__name__}: {exc}\n"
                           f"session sends: {default_model}")
                 return
 

@@ -44,6 +44,10 @@ call.
   and it stays out of config reprs.
 - `inference_url` and `batch_inference_url` default to
   `http://127.0.0.1:11434` (the manager's loopback port).
+- **The `/model` failure messages (commands/_builtin_impls.py)** — a failed
+  `/swap` POST and a failed `list` now name the exception type alongside its
+  text; an httpx timeout stringifies to `''`, so a message built from the
+  exception alone read blank.
 
 ## [1.12.1] - 2026-10-15
 
