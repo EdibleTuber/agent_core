@@ -10,7 +10,7 @@ from agent_core.config import BaseConfig, load_config
 
 def test_baseconfig_defaults():
     cfg = BaseConfig()
-    assert cfg.inference_url == "http://192.168.1.14:11434"
+    assert cfg.inference_url == "http://127.0.0.1:11434"
     assert cfg.history_depth == 50
     assert cfg.max_response_tokens == 4096
     assert cfg.batch_enabled is False
@@ -23,7 +23,7 @@ def test_load_config_no_env_uses_defaults(monkeypatch, tmp_path):
         if key.startswith("PAL_"):
             monkeypatch.delenv(key, raising=False)
     cfg = load_config(BaseConfig, agent_name="pal")
-    assert cfg.inference_url == "http://192.168.1.14:11434"
+    assert cfg.inference_url == BaseConfig().inference_url
     # socket_path should be derived since not explicitly set.
     assert cfg.socket_path is not None
     assert str(cfg.socket_path).endswith("pal.sock")
@@ -81,7 +81,7 @@ def test_load_config_subclass_extra_field(monkeypatch):
     cfg = load_config(MyConfig, agent_name="pal")
     assert cfg.my_extra == 999
     # BaseConfig fields still load correctly via the same prefix.
-    assert cfg.inference_url == "http://192.168.1.14:11434"  # unchanged from default
+    assert cfg.inference_url == BaseConfig().inference_url  # unchanged from default
 
 
 def test_load_config_invalid_int_raises_with_field_name(monkeypatch):

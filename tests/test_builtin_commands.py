@@ -386,15 +386,7 @@ async def test_rate_no_args():
 # ---------------------------------------------------------------------------
 # /model
 # ---------------------------------------------------------------------------
-
-async def test_model_show_reports_loaded_slots(mock_inference_server):
-    # No arg -> GET /status -> report each slot's loaded model + session pointer.
-    inf = MagicMock(default_model="test-model", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("", _ctx(agent)))
-    body = _body(msgs)
-    assert "main:" in body
-    assert "session sends: test-model" in body
+# The swap and status tests are in tests/test_model_command.py.
 
 
 async def test_model_show_falls_back_without_status():
@@ -405,22 +397,6 @@ async def test_model_show_falls_back_without_status():
     assert "model-a" in _body(msgs)
 
 
-async def test_model_switch_swaps_and_repoints(mock_inference_server):
-    # <name> -> POST /swap succeeds -> session repointed to the loaded model.
-    inf = MagicMock(default_model="old-model", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("new-model-x", _ctx(agent)))
-    assert inf.default_model == "new-model-x"          # repointed
-    assert "new-model-x" in _body(msgs)
-
-
-async def test_model_switch_target_batch_does_not_repoint_main(mock_inference_server):
-    # --target batch swaps the batch slot; the main session pointer is untouched.
-    inf = MagicMock(default_model="main-model", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("--target batch batch-model", _ctx(agent)))
-    assert inf.default_model == "main-model"           # main pointer unchanged
-    assert "batch" in _body(msgs)
 
 
 async def test_model_list(mock_inference_server):
@@ -450,79 +426,6 @@ async def test_model_swap_failure_does_not_repoint():
         (getattr(m, "text", "") or getattr(m, "error", "")) for m in msgs
     )
     assert "failed" in combined.lower()
-
-
-def _err_and_text(msgs):
-    return " ".join(
-        (getattr(m, "text", "") or getattr(m, "error", "")) for m in msgs
-    )
-
-
-async def test_model_switch_202_polls_until_healthy(mock_inference_server, monkeypatch):
-    # POST /swap -> 202, /status reports swapping for a couple polls, then the
-    # requested model loaded + healthy -> success + repoint.
-    import agent_core.commands._builtin_impls as bi
-    from tests import conftest as cf
-    monkeypatch.setattr(bi, "_SWAP_POLL_INTERVAL", 0.01)
-    cf.SWAP_STATE.update(mode="async", polls_remaining=2, final_healthy=True)
-
-    inf = MagicMock(default_model="old-model", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("new-model-x", _ctx(agent)))
-
-    assert inf.default_model == "new-model-x"          # repointed after poll
-    body = _body(msgs)
-    assert "swapping" in body.lower()                  # interim progress line
-    assert "new-model-x" in body
-
-
-async def test_model_switch_202_unhealthy_does_not_repoint(mock_inference_server, monkeypatch):
-    # 202 accepted, but the slot comes back unhealthy -> failure, no repoint.
-    import agent_core.commands._builtin_impls as bi
-    from tests import conftest as cf
-    monkeypatch.setattr(bi, "_SWAP_POLL_INTERVAL", 0.01)
-    cf.SWAP_STATE.update(mode="async", polls_remaining=1, final_healthy=False)
-
-    inf = MagicMock(default_model="stay-put", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("broken-model", _ctx(agent)))
-
-    assert inf.default_model == "stay-put"             # unchanged on failure
-    combined = _err_and_text(msgs).lower()
-    assert "failed" in combined and "unhealthy" in combined
-
-
-async def test_model_switch_202_times_out(mock_inference_server, monkeypatch):
-    # Slot never stops swapping -> the poll loop gives up at the deadline.
-    import agent_core.commands._builtin_impls as bi
-    from tests import conftest as cf
-    monkeypatch.setattr(bi, "_SWAP_POLL_INTERVAL", 0.01)
-    monkeypatch.setattr(bi, "_SWAP_POLL_TIMEOUT", 0.03)
-    cf.SWAP_STATE.update(mode="async", polls_remaining=10_000, final_healthy=True)
-
-    inf = MagicMock(default_model="stay-put", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("slow-model", _ctx(agent)))
-
-    assert inf.default_model == "stay-put"
-    assert "timed out" in _err_and_text(msgs).lower()
-
-
-async def test_model_switch_rejected_reports_detail(mock_inference_server):
-    # Manager rejects the swap (e.g. 404 model not found) -> the error envelope's
-    # message is surfaced, not a blank string, and the session is untouched.
-    from tests import conftest as cf
-    cf.SWAP_STATE.update(mode="reject", reject_status=404)
-
-    inf = MagicMock(default_model="stay-put", base_url=mock_inference_server)
-    agent = MagicMock(inference=inf)
-    msgs = await _collect(Model().run("ghost-model", _ctx(agent)))
-
-    assert inf.default_model == "stay-put"
-    combined = _err_and_text(msgs)
-    assert "failed" in combined.lower()
-    assert "not found" in combined.lower()             # envelope message surfaced
-    assert "404" in combined
 
 
 # ---------------------------------------------------------------------------

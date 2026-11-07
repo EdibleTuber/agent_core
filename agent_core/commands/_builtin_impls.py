@@ -27,7 +27,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from agent_core.commands.base import Command
-from agent_core.protocol.messages import ErrorMessage, ResponseMessage
+from agent_core.protocol.messages import (
+    ErrorMessage,
+    ResponseMessage,
+    ToolProgressMessage,
+)
 from agent_core.scratchpad import Scratchpad, ScratchpadTooLarge
 
 
@@ -267,83 +271,93 @@ class Rate(Command):
         yield ResponseMessage(text=f"Rating recorded: {rating}" + (f" — {comment}" if comment else ""))
 
 
-# POST /swap returns 202 and runs the swap in the background; the command then
-# polls GET /status until the slot stops swapping. Interval and overall budget
-# are module-level so tests can shrink them. The budget must exceed the
-# manager's own SWAP_TIMEOUT so a slow cold load isn't cut short client-side.
-_SWAP_POLL_INTERVAL = 3.0
-_SWAP_POLL_TIMEOUT = 660.0
+# The 202 from /swap is only a queue receipt; the answer is the poll entry
+# whose last_swap.id carries this request's id. Poll every 2 s, and give up
+# after two of the manager's 600 s SWAP_TIMEOUTs plus restarts.
+MODEL_SWAP_POLL_SECONDS = 2.0
+MODEL_SWAP_WAIT_SECONDS = 1500.0
 
 
-def _swap_error_detail(resp) -> str:
-    """Pull a human-readable reason out of the manager's error response.
-
-    The manager rejects a swap with {"error": {"type", "message"}}; fall back
-    to the raw body (truncated) if it isn't shaped that way.
-    """
+def _swap_payload(resp) -> dict:
+    """The manager's JSON body, or {} when it is missing or not a dict."""
     try:
-        err = resp.json().get("error")
-        if isinstance(err, dict) and err.get("message"):
-            return f"HTTP {resp.status_code}: {err['message']}"
+        data = resp.json()
     except Exception:
-        pass
-    body = (resp.text or "").strip()
-    return f"HTTP {resp.status_code}: {body[:200]}" if body else f"HTTP {resp.status_code}"
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _manager_error_message(resp) -> str:
+    """The manager's error.message, or a bare HTTP status when it has none."""
+    error = _swap_payload(resp).get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message
+    return f"HTTP {resp.status_code}"
 
 
 class Model(Command):
     name = "model"
-    args = "[list | default | [--target main|batch] <name>]"
-    description = "Show, list, or switch the active model (swaps on the inference manager)"
+    args = "[list | default | [--target <slot>] <name>]"
+    description = "Show what each slot has loaded, list models, or swap a slot"
     requires = ("inference",)
 
     async def run(self, raw_args: str, ctx) -> AsyncIterator:
+        import asyncio
+        import time
+        import uuid
+
         import httpx
 
         arg = raw_args.strip()
         inf = ctx.agent.inference
         base = inf.base_url
+        # The manager token (phase 6) goes on every manager call this command
+        # makes: /status, /v1/models and /swap alike.
+        token = getattr(inf, "token", None)
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        default_model = inf.default_model
 
         # --- no arg: show what each slot has loaded + what the session sends ---
         if not arg:
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.get(f"{base}/status")
+                async with httpx.AsyncClient(base_url=base, timeout=10.0,
+                                             headers=headers) as client:
+                    resp = await client.get("/status")
                     resp.raise_for_status()
-                slots = resp.json().get("slots", {})
+                slots = _swap_payload(resp).get("slots", {})
             except Exception:
                 # Plain OpenAI endpoint with no /status: fall back to the pointer.
-                yield ResponseMessage(text=f"model: {inf.default_model}", command="model")
+                yield ResponseMessage(text=f"model: {default_model}", command="model")
                 return
             lines = ["Loaded models:"]
-            for slot_name in ("main", "batch"):
-                s = slots.get(slot_name)
-                if s is not None:
-                    if s.get("swapping"):
-                        health = "swapping…"
-                    else:
-                        health = "healthy" if s.get("healthy") else "UNHEALTHY"
-                    lines.append(f"  {slot_name}: {s.get('loaded_model', '?')} ({health})")
-            lines.append(f"session sends: {inf.default_model}")
+            for slot_name, s in slots.items():
+                loaded = s.get("loaded_model") or "none"
+                lines.append(f"  {slot_name}: {loaded} ({s.get('state', '?')})")
+            lines.append(f"session sends: {default_model}")
             yield ResponseMessage(text="\n".join(lines), command="model")
             return
 
         # --- list: available GGUFs on the manager ---
         if arg == "list":
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    resp = await client.get(f"{base}/v1/models")
+                async with httpx.AsyncClient(base_url=base, timeout=10.0,
+                                             headers=headers) as client:
+                    resp = await client.get("/v1/models")
                     resp.raise_for_status()
                 names = [m["id"] for m in resp.json().get("data", [])]
             except Exception as exc:
-                yield ErrorMessage(error=f"Could not reach inference manager: {exc}")
+                yield ErrorMessage(
+                    error=f"Could not reach inference manager: "
+                          f"{type(exc).__name__}: {exc}")
                 return
             if not names:
                 yield ResponseMessage(text="No models available.", command="model")
                 return
             lines = ["Available models:"]
             for i, name in enumerate(names, 1):
-                marker = " (session)" if name == inf.default_model else ""
+                marker = " (session)" if name == default_model else ""
                 lines.append(f"  {i}. {name}{marker}")
             yield ResponseMessage(text="\n".join(lines), command="model")
             return
@@ -362,101 +376,104 @@ class Model(Command):
             )
             return
 
-        # --- swap: [--target main|batch] <name> ---
-        target = "main"
+        # --- swap: [--target <slot>] <name> ---
+        # The session is never repointed after a swap: a swap changes what a
+        # slot holds for every client, and which model this agent sends stays
+        # its configuration's business. Every report ends with the pointer so
+        # no outcome reads as a session switch.
+        target = None
         parts = arg.split()
         if parts[0] == "--target":
             if len(parts) < 3:
-                yield ResponseMessage(
-                    text="Usage: /model [--target main|batch] <name>", command="model")
+                yield ResponseMessage(text=f"Usage: /model {self.args}", command="model")
                 return
             target = parts[1]
             name = " ".join(parts[2:])
-            if target not in ("main", "batch"):
-                yield ResponseMessage(
-                    text=f"Unknown target: {target}. Use main or batch.", command="model")
-                return
         else:
             name = arg
-
-        # Kick off the swap. The manager answers fast now: 200 if the model is
-        # already loaded and healthy, 202 if it started a background swap that we
-        # then poll to completion via GET /status. A cold swap can take a while
-        # (llama-server restart), but that wait lives in the poll loop below, not
-        # in this request -- so the POST itself gets a short timeout.
-        import asyncio
-        import time
-
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{base}/swap", json={"model": name, "target": target})
-        except Exception as exc:
-            yield ErrorMessage(
-                error=f"Swap request failed ({target} -> {name}): "
-                      f"{type(exc).__name__}: {exc}")
+        if not name:
+            yield ResponseMessage(text=f"Usage: /model {self.args}", command="model")
             return
 
-        if resp.status_code == 200:
-            # Already loaded and healthy -- nothing to wait on.
-            if target == "main":
-                inf.default_model = name
+        # Slot names are the manager's to check; an invalid one comes back as
+        # its 400 message, which is shown as is.
+        body = {"model": name}
+        if target is not None:
+            body["target"] = target
+        request_id = uuid.uuid4().hex
+
+        async with httpx.AsyncClient(base_url=base, timeout=30.0,
+                                     headers=headers) as client:
+            try:
+                resp = await client.post("/swap", json=body,
+                                         headers={"X-Request-Id": request_id})
+            except Exception as exc:
+                yield ErrorMessage(
+                    error=f"Swap failed ({name}): {type(exc).__name__}: {exc}\n"
+                          f"session sends: {default_model}")
+                return
+
+            payload = _swap_payload(resp)
+
+            if resp.status_code == 200:  # already loaded; nothing to wait for
+                slot = payload.get("slot") or "?"
+                yield ResponseMessage(
+                    text=f"model: {name} already loaded on {slot}\n"
+                         f"session sends: {default_model}",
+                    command="model",
+                )
+                return
+
+            if resp.status_code != 202:  # a refusal: show the manager's message
+                yield ErrorMessage(
+                    error=f"Swap failed ({name}): {_manager_error_message(resp)}\n"
+                          f"session sends: {default_model}")
+                return
+
+            slot = payload.get("slot") or "?"
+            yield ToolProgressMessage(
+                tool="model",
+                arguments={"status": f"swapping {slot} -> {name}"},
+            )
+
+            entry = None
+            deadline = time.monotonic() + MODEL_SWAP_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                await asyncio.sleep(MODEL_SWAP_POLL_SECONDS)
+                # A poll that fails (503, connection drop) does not end the
+                # wait; the next poll can still carry the answer.
+                try:
+                    status = await client.get("/status")
+                    status.raise_for_status()
+                    slots = _swap_payload(status).get("slots", {})
+                except Exception:
+                    continue
+                candidate = (slots.get(slot) or {}).get("last_swap")
+                if candidate is not None and candidate.get("id") == request_id:
+                    entry = candidate
+                    break
+
+        if entry is None:
             yield ResponseMessage(
-                text=f"model: {target} -> {name} (already loaded; session repointed)",
-                command="model")
+                text=f"model: swap of {name} on {slot} is still running; "
+                     f"/model shows its state\n"
+                     f"session sends: {default_model}",
+                command="model",
+            )
             return
 
-        if resp.status_code != 202:
-            # The manager rejects with a JSON error envelope (400/404/503).
-            detail = _swap_error_detail(resp)
-            yield ErrorMessage(error=f"Swap failed ({target} -> {name}): {detail}")
+        outcome = entry.get("outcome")
+        if outcome in ("ok", "already_loaded"):
+            yield ResponseMessage(
+                text=f"model: {slot} -> {name} swapped ({outcome})\n"
+                     f"session sends: {default_model}",
+                command="model",
+            )
             return
-
-        # 202 Accepted: the swap is running in the background. Poll /status until
-        # the slot stops swapping, then let its health decide success/failure.
-        yield ResponseMessage(
-            text=f"model: swapping {target} -> {name} (loading on manager, polling…)",
-            command="model")
-
-        deadline = time.monotonic() + _SWAP_POLL_TIMEOUT
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                while True:
-                    await asyncio.sleep(_SWAP_POLL_INTERVAL)
-                    if time.monotonic() > deadline:
-                        yield ErrorMessage(
-                            error=f"Swap timed out after {int(_SWAP_POLL_TIMEOUT)}s "
-                                  f"waiting for {target} -> {name}")
-                        return
-                    sresp = await client.get(f"{base}/status")
-                    sresp.raise_for_status()
-                    slot = sresp.json().get("slots", {}).get(target) or {}
-                    if slot.get("swapping"):
-                        continue
-                    # Not swapping any more. Success only once the slot is healthy
-                    # AND actually serving the model we asked for -- which also
-                    # guards the brief window before the manager takes swap_lock,
-                    # where /status may still show the OLD model as healthy.
-                    if slot.get("healthy") and slot.get("loaded_model") == name:
-                        if target == "main":
-                            inf.default_model = name
-                        yield ResponseMessage(
-                            text=f"model: {target} -> {name} "
-                                 "(loaded on manager + session repointed)",
-                            command="model")
-                        return
-                    if not slot.get("healthy"):
-                        yield ErrorMessage(
-                            error=f"Swap failed ({target} -> {name}): slot reports "
-                                  "unhealthy after swap")
-                        return
-                    # Healthy, not swapping, but not yet the requested model: the
-                    # background swap hasn't taken the lock; keep polling.
-        except Exception as exc:
-            yield ErrorMessage(
-                error=f"Swap polling failed ({target} -> {name}): "
-                      f"{type(exc).__name__}: {exc}")
-            return
+        message = entry.get("message") or "no message from the manager"
+        yield ErrorMessage(
+            error=f"model: swap of {name} on {slot} {outcome}: {message}\n"
+                  f"session sends: {default_model}")
 
 
 class Think(Command):

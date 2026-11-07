@@ -16,10 +16,18 @@ logger = logging.getLogger(__name__)
 
 
 class RetrievalClient:
-    def __init__(self, base_url: str, collection_id: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        collection_id: str,
+        token: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.collection_id = collection_id
-        self._client = httpx.AsyncClient(timeout=30.0)
+        # The manager refuses requests without its token, so it goes on
+        # every request this client sends.
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self._client = httpx.AsyncClient(timeout=30.0, headers=headers)
 
     async def close(self) -> None:
         await self._client.aclose()

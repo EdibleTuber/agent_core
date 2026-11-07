@@ -102,9 +102,11 @@ def run_daemon(
     )
     agent.inference = InferenceClient(
         base_url=config.inference_url, model=config.model,
+        token=config.manager_token,
     )
     agent.retrieval = RetrievalClient(
         base_url=config.inference_url, collection_id=config.collection_id,
+        token=config.manager_token,
     )
     agent.websearch = WebSearchClient(base_url=config.searxng_url)
     agent.fetcher = URLFetcher(
